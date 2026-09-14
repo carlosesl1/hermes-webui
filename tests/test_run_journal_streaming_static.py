@@ -13,16 +13,23 @@ def test_streaming_initializes_one_run_journal_writer_per_stream():
     assert register_idx < writer_idx < cancel_idx
 
 
-def test_streaming_journals_sse_events_before_queue_delivery():
-    src = Path("api/streaming.py").read_text(encoding="utf-8")
-    put_idx = src.index("def put(event, data):")
-    journal_idx = src.index("run_journal.append_sse_event(event, data)", put_idx)
-    queue_idx = src.index("q.put_nowait(queue_item)", put_idx)
-    block = src[put_idx:queue_idx]
+def test_streaming_journals_sse_events_before_queue_delivery(tmp_path):
+    from api.config import StreamChannel
+    from api.run_journal import RunJournalWriter, read_run_events
+    from api.streaming import _publish_stream_event
 
-    assert put_idx < journal_idx < queue_idx
-    assert "Failed to append run journal event" in block
-    assert "queue_item = (event, data, event_id) if event_id and hasattr(q, \"subscribe_with_snapshot\") else (event, data)" in block
+    class CheckingChannel(StreamChannel):
+        def put_nowait(self, item):
+            rows = read_run_events("session", "run", session_dir=tmp_path)["events"]
+            assert rows[-1]["event_id"] == item[2]
+            assert rows[-1]["payload"] == item[1]
+            super().put_nowait(item)
+
+    channel = CheckingChannel()
+    subscriber, _ = channel.subscribe_with_snapshot()
+    writer = RunJournalWriter("session", "run", session_dir=tmp_path)
+    _publish_stream_event(writer, channel, "run", "token", {"text": "hello"})
+    assert subscriber.get_nowait() == ("token", {"text": "hello"}, "run:1")
 
 
 

@@ -9362,32 +9362,17 @@ def _run_agent_streaming(
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
-        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
+        # Interrupting a provider can synchronously produce apperror. Once
+        # cancellation is requested, it must not beat the HTTP cancel journal
+        # append and settle the run as errored instead of interrupted-by-user.
+        if cancel_event.is_set() and not _success_writeback_committed and event != 'cancel':
             return
-        event_id = None
-        if run_journal is not None:
-            try:
-                journaled = run_journal.append_sse_event(event, data)
-                # Carry the exact journal id for this queued frame. A global
-                # "latest event" side channel is still kept for legacy queues,
-                # but StreamChannel subscribers need the per-item id so a
-                # queued backlog cannot advance the browser cursor past an
-                # undelivered event.
-                event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
-                if event_id:
-                    STREAM_LAST_EVENT_ID[stream_id] = event_id
-            except Exception:
-                logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
-        if event_id and hasattr(q, "note_last_event_id"):
-            try:
-                q.note_last_event_id(event_id)
-            except Exception:
-                logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
-        try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
-            q.put_nowait(queue_item)
-        except Exception:
-            logger.debug("Failed to put event to queue")
+        _publish_stream_event(
+            run_journal, q, stream_id, event, data,
+            should_append=lambda: (
+                event == 'cancel' or _success_writeback_committed or not cancel_event.is_set()
+            ),
+        )
 
     # #5940: capture a terminal (non-retryable) provider error the Agent emits via
     # its lifecycle status_callback. The Agent aborts a non-retryable API error
@@ -13317,12 +13302,46 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                        "stream_id": active_stream_id})
 
 
+def _publish_stream_event(run_journal, q, stream_id, event, data, *, should_append=None):
+    """Journal and publish one frame in the same per-run critical section.
+
+    Only queue/cursor bookkeeping runs in the callback; never session mutation.
+    HTTP cancel uses the same path even when the live channel is already gone.
+    """
+    def publish(journaled):
+        event_id = journaled.get('event_id') if journaled else None
+        if event_id:
+            STREAM_LAST_EVENT_ID[stream_id] = event_id
+        if q is None:
+            return
+        if event_id and hasattr(q, "note_last_event_id"):
+            try:
+                q.note_last_event_id(event_id)
+            except Exception:
+                logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
+        queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+        try:
+            q.put_nowait(queue_item)
+        except Exception:
+            # A detached/broken transport must not turn a durable terminal
+            # append into a worker error. Reconnect can replay the journal.
+            logger.debug("Failed to put event to queue for stream %s", stream_id, exc_info=True)
+
+    if run_journal is not None:
+        # A suppressed late/duplicate cancellation must not leak an unjournaled
+        # frame with the previous cursor into the live channel.
+        return run_journal.append_sse_event(event, data, publish=publish, should_append=should_append)
+    if should_append is not None and not should_append():
+        return None
+    publish(None)
+    return None
+
+
 def cancel_stream(stream_id: str) -> bool:
     """Signal an in-flight stream to cancel. Returns True if work was found.
 
-    Eagerly releases the session lock (pops STREAMS/CANCEL_FLAGS/AGENT_INSTANCES
-    and clears session.active_stream_id) so new /api/chat/start requests succeed
-    immediately after cancel, even if the agent thread is still blocked.
+    Detaches the UI stream and durably settles cancellation. ACTIVE_RUNS stays
+    lifecycle-busy while the worker unwinds, so a successor cannot overlap it.
 
     The worker thread's finally block uses .pop(key, None), so the double-pop is
     a safe no-op. Session cleanup runs outside STREAMS_LOCK to preserve lock
@@ -13479,9 +13498,8 @@ def cancel_stream(stream_id: str) -> bool:
     _emit_cancel_event = True
 
     # ── Eager session lock release (fixes #653) ──────────────────────────
-    # Pop stream state now so the 409 guard in routes.py sees the session
-    # as idle and allows new /api/chat/start immediately after cancel,
-    # even if the agent thread is still blocked in a C-level syscall.
+    # Detach the live transport now; ACTIVE_RUNS still blocks successor
+    # admission while the cancelled worker is unwinding.
     # The worker thread's finally block uses .pop(key, None) too, so a
     # double-pop here is safe (no-op).
     if stream_present:
@@ -13688,17 +13706,14 @@ def cancel_stream(stream_id: str) -> bool:
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
-    if _emit_cancel_event and q:
-        _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
-        if _cancel_event_id and hasattr(q, "note_last_event_id"):
-            try:
-                q.note_last_event_id(_cancel_event_id)
-            except Exception:
-                logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
-        try:
-            _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
-            q.put_nowait(('cancel', _payload))
-        except Exception:
-            logger.debug("Failed to put cancel event to queue")
+    if _emit_cancel_event and _cancel_session_id and _cancel_session_payload is not None:
+        _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
+        _publish_stream_event(
+            RunJournalWriter(_cancel_session_id, stream_id), q, stream_id, 'cancel', _payload,
+        )
+    elif _emit_cancel_event and not _cancel_session_id and q is not None:
+        # Legacy unowned transports have no journal identity. Close those
+        # queues without borrowing a cursor from an unrelated/previous frame.
+        _publish_stream_event(None, q, stream_id, 'cancel', _cancel_event_payload('Cancelled by user'))
 
     return True
