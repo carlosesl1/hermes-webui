@@ -3,7 +3,8 @@
 ## Tested source
 
 - Fork baseline: `94fd2da83008d24719eb3b52a691ce696d4f992c`.
-- Final product-source revision: `1922c6dfd4af11539871b89927aa7ffb30841db6`. Subsequent publication changes are documentation and CI gate registration only.
+- Initial product-source revision: `1922c6dfd4af11539871b89927aa7ffb30841db6`.
+- Retry-batch follow-up product revision: `8e5b9d2fdfd1a6007b6adab25d3e7a802babe52f`; the integrated Python selection below was rerun against these product/test changes before commit. JavaScript/browser source was unchanged by this follow-up.
 - Test runtime: Linux ARM64, Python 3.12.14, Node 22.22.0 and Chromium via Playwright.
 - Tests used temporary HOME, Hermes home/config and WebUI state. No production service, user session or provider credentials were used. No deployment was performed.
 
@@ -11,7 +12,7 @@
 
 | Gate | Result | Evidence scope |
 | --- | --- | --- |
-| Integrated targeted selection (95 test files) | 953 passed, 11 skipped; no failures/errors | Journal/cancel, wakeups, delivery, background, history, session/cache, composer and keyboard-adjacent regressions |
+| Integrated targeted selection (96 test files) | 962 passed, 11 skipped; no failures/errors | Journal/cancel, wakeups, delivery, background, history, session/cache, composer and keyboard-adjacent regressions |
 | Accessibility browser wrapper | 9 passed | Reasoning, workspace panel and busy composer at 1440×900, 522×1232 and 390×844 |
 | Background HTTP/browser | All three viewports passed; no console errors or body overflow | Import/load API, expand/collapse, reload, session switch, original transcript read-back and visible full-content action |
 | Background task renderer | Passed | Repeatable snapshots, siblings, safe result disclosure, navigation and no assistant-message injection; collaborators are controlled fixtures |
@@ -21,6 +22,14 @@
 | Python/static | Compilation and diff-aware Ruff passed; git diff check passed | No newly introduced Ruff violations on modified lines; not a claim that the legacy repository is globally lint-clean |
 
 The 11 integrated skips are explicit: unavailable full-core bridge/cross-session imports, a Windows-only check, and the existing wakeup-card Playwright cases in the non-browser Python environment. Separate browser gates above ran in the browser environment. Selected real core delivery functions were AST-loaded into a temporary SQLite fixture; that is not a live core/restart E2E.
+
+## Late-review reconciliation and remote CI
+
+- Nested approval insertion and focus preservation were already fixed in the published tree. All five actual-source DOM probes passed again.
+- Retried batch recombination remained a real defect in `2afabac`: the new tests produced **8 failures and 1 pass** before the fix. After preserving server-assigned retry batches as atomic FIFO barriers, the targeted selection passed **63/63**; the expanded integrated selection passed **962**, skipped **11**, with no failures/errors in **140.76 seconds**.
+- Coverage includes a full 16-event batch plus overflow, first/middle/last/sibling queue positions, repeated rejection and stable identity, and busy, credential-paused, 503 and exception outcomes. Plain output resembling a header does not become batch provenance.
+- The remote [Tests run for `2afabac`](https://github.com/carlosesl1/hermes-webui/actions/runs/34888658982) completed with **failure**. Logs from all five Python 3.12 shards include locale-key coverage failures and UI/history/streaming regressions. These remain a separate unresolved CI boundary; the local targeted selection is not a substitute for the full matrix.
+- Remote browser smoke, conversation lifecycle and Docs CI passed for `2afabac`. Those results do not certify a newer commit's CI. Check the current PR head before reporting release readiness; this follow-up is not a merge/deploy approval.
 
 ## Reproduction
 
@@ -48,6 +57,7 @@ tests/test_api_timeout.py
 tests/test_async_delegation_webui_bridge.py
 tests/test_async_delivery_admission.py
 tests/test_background_activity_groups.py
+tests/test_background_batch_retry.py
 tests/test_background_durable.py
 tests/test_background_process_restart_recovery.py
 tests/test_background_process_wakeup_format.py
