@@ -465,22 +465,14 @@ class TestMessagePaginationFrontend:
         """_loadOlderMessages must be defined for scroll-to-top loading."""
         assert "async function _loadOlderMessages" in SESSIONS_JS
 
-    def test_load_older_uses_cumulative_tail_limit(self):
-        """_loadOlderMessages requests a larger authoritative tail window via msg_limit.
-
-        The cumulative tail path is the default. msg_before remains in the
-        body as the race-fallback request when the suffix-continuity check
-        fails.
-        """
+    def test_load_older_uses_bounded_cursor_page(self):
+        """Older loads retain the current suffix and validate cursor continuity."""
         fn_start = SESSIONS_JS.find("async function _loadOlderMessages")
         fn_end = SESSIONS_JS.find("\n}", fn_start) + 2
         fn_body = SESSIONS_JS[fn_start:fn_end]
-
-        assert "requestedLimit" in fn_body
-        assert "S.messages || []" in fn_body
-        assert "msg_limit=${requestedLimit}" in fn_body
-        assert "tailMatches" in fn_body
-        # Race fallback still issues the legacy msg_before page request.
+        assert "msg_limit=${_INITIAL_MSG_LIMIT}&msg_boundary=1" in fn_body
+        assert "_messages_boundary" in fn_body
+        assert "[...olderMsgs, ...S.messages]" in fn_body
         assert "msg_before=${_oldestIdx}" in fn_body
 
     def test_ensure_all_messages_function_exists(self):

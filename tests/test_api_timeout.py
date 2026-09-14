@@ -234,16 +234,10 @@ def test_session_message_loads_keep_explicit_longer_timeouts():
         "      {timeoutMs:120000}\n"
         "    )"
     ) in src
-    # _loadOlderMessages now picks between two strategies (tail-growth vs
-    # msg_before paging) via a useBeforePaging ternary, but both keep the long
-    # timeoutMs:120000. Assert each URL + timeout survives in the source.
+    # Fixed backward pages retain the same long timeout as initial loads.
     assert (
-        "`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,\n"
-        "          {timeoutMs:120000}"
-    ) in src
-    assert (
-        "`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,\n"
-        "          {timeoutMs:120000}"
+        "`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}&msg_boundary=1`,\n"
+        "      {timeoutMs:120000}"
     ) in src
 
 
