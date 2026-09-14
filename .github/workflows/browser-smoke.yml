@@ -129,6 +129,7 @@ jobs:
         run: |
           python tests/browser_background_activity.py
           python tests/browser_background_tasks.py
+          python tests/browser_background_live.py
           python tests/browser_chat_controls_accessibility.py
 
       - name: Upload chat browser evidence
