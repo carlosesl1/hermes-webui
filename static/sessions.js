@@ -1505,7 +1505,9 @@ async function newSession(flash, options={}){
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
+    if(typeof stopBackgroundPolling==='function') stopBackgroundPolling();
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    if(typeof startBackgroundPolling==='function') startBackgroundPolling(S.session.session_id);
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -1749,6 +1751,7 @@ async function loadSession(sid){
     _messageUserUnpinned = false;
     _scrollPinned = true;
   }
+  if(typeof stopBackgroundPolling==='function') stopBackgroundPolling();
   stopApprovalPolling();hideApprovalCard(forceReload);
   if(typeof stopSessionStream==='function') stopSessionStream();
   _yoloEnabled=false;_updateYoloPill();
@@ -1988,6 +1991,7 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  if(typeof startBackgroundPolling==='function') startBackgroundPolling(S.session.session_id);
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
@@ -4362,7 +4366,9 @@ function _renderBatchActionBar(){
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
-        S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+        S.session=null;S.messages=[];S.entries=[];
+        if(typeof stopBackgroundPolling==='function') stopBackgroundPolling();
+        localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
@@ -9193,6 +9199,7 @@ async function deleteSession(sid, beforeDelete=null){
   }
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
+    if(typeof stopBackgroundPolling==='function') stopBackgroundPolling();
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
     // load the most recent remaining session, or show blank if none left

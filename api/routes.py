@@ -14051,8 +14051,10 @@ def handle_get(handler, parsed) -> bool:
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
-        from api.background import get_results
-        return j(handler, {"results": get_results(sid)})
+        from api.background import get_background_tasks
+        tasks = get_background_tasks(sid)
+        return j(handler, {"parent_session_id": sid, "tasks": tasks,
+                           "results": [task for task in tasks if task["status"] != "running"]})
 
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
@@ -22405,68 +22407,79 @@ def _handle_background(handler, body):
     bg.title = f"bg: {prompt[:60]}"
     bg.save()
     stream_id = uuid.uuid4().hex
-    bg.active_stream_id = stream_id
-    register_session_writeback_owner(bg.session_id, stream_id)
-    bg.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, bg.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    task_id = uuid.uuid4().hex[:8]
+    task_id = uuid.uuid4().hex
     from api.background import track_background, complete_background
-    parent_sid = body["session_id"]
+    parent_sid = s.session_id
     bg_sid = bg.session_id
-    track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
+    # Capture immutable execution inputs, never mutate/save the parent from a worker.
+    bg_model, bg_workspace = bg.model, bg.workspace
+    try:
+        track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
+    except Exception:
+        logger.exception("Could not persist background task before launch")
+        return bad(handler, "Could not save background task; task was not started", 500)
 
     def _run_bg_and_notify():
-        """Run the background agent, then mark the tracked task `done` with the
-        last assistant reply so `/api/background/status` can surface it.  Without
-        this, `complete_background()` is never called and the result is lost —
-        `get_results()` would see a forever-`running` task and return nothing.
-        """
+        """Settle the separate task ledger before deleting child output."""
+        answer, status, error = "", "no_response", None
         try:
             _run_agent_streaming(
-                bg_sid,
-                prompt,
-                s.model,
-                s.workspace,
-                stream_id,
-                None,
+                bg_sid, prompt, bg_model, bg_workspace, stream_id, None,
                 model_provider=model_provider,
             )
-            # Reload the bg session from disk and extract the final assistant reply.
-            try:
-                from api.models import Session as _Session
-                reloaded = _Session.load(bg_sid)
-                _answer = ""
-                for _m in reversed((reloaded.messages if reloaded else None) or []):
-                    if not isinstance(_m, dict) or _m.get("role") != "assistant":
-                        continue
-                    if _m.get("_error"):
-                        continue
-                    _content = str(_m.get("content") or "").strip()
-                    if _content:
-                        _answer = _content
-                        break
-                complete_background(parent_sid, task_id, _answer or "(no answer produced)")
-            except Exception:
-                complete_background(parent_sid, task_id, "(background task failed)")
-            # Best-effort cleanup of the hidden bg session file so it doesn't
-            # clutter the sidebar or SESSION_DIR. The index is pruned on the
-            # next rebuild via _index_entry_exists().
+            from api.models import Session as _Session
+            reloaded = _Session.load(bg_sid)
+            for message in reversed((reloaded.messages if reloaded else None) or []):
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                content = str(message.get("content") or "").strip()
+                if message.get("_error"):
+                    status = "cancelled" if message.get("provider_details_label") == "Cancellation details" else "error"
+                    error = content or "Background task failed."
+                    break
+                # Tool-call prose is progress, not a final answer.
+                if content and not message.get("tool_calls"):
+                    answer, status = content, "done"
+                    break
+        except Exception:
+            logger.exception("Background task failed: %s", task_id)
+            status, error = "error", "Background task failed."
+        try:
+            saved = complete_background(parent_sid, task_id, answer, status=status, error=error)
+        except Exception:
+            logger.exception("Could not save background result; retaining child %s", bg_sid)
+            return
+        if saved:
             try:
                 (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
-            except Exception:
-                pass
-        except Exception:
-            try:
-                complete_background(parent_sid, task_id, "(background task failed)")
-            except Exception:
-                pass
+            except OSError:
+                logger.warning("Could not clean up background child %s", bg_sid)
 
-    thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
-    thr.start()
-    return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
+    try:
+        bg.active_stream_id = stream_id
+        register_session_writeback_owner(bg_sid, stream_id)
+        bg.save()
+        stream = create_stream_channel()
+        register_stream_owner(stream_id, bg_sid)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
+        thr.start()
+    except Exception:
+        logger.exception("Background worker could not start: %s", task_id)
+        try:
+            complete_background(parent_sid, task_id, "", status="error", error="Background worker could not start.")
+        except Exception:
+            logger.exception("Could not persist background launch failure; retaining child %s", bg_sid)
+        finally:
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+            unregister_stream_owner(stream_id)
+            from api.config import clear_session_writeback_owner_if_owned
+            clear_session_writeback_owner_if_owned(bg_sid, stream_id)
+        return bad(handler, "Background worker could not start", 500)
+    return j(handler, {"task_id": task_id, "stream_id": stream_id,
+                       "session_id": bg.session_id, "parent_session_id": parent_sid})
 
 
 def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None, source: str = "webui") -> None:

@@ -1,5 +1,7 @@
 # Hermes Web UI: Developer and Architecture Guide
 
+> Durable `/background` task ownership and delivery: [background tasks](docs/background-tasks.md).
+>
 > This document is the canonical reference for anyone (human or agent) working on the
 > Hermes Web UI. It covers the exact current state of the code, every design decision and
 > quirk discovered during development, and a phased architecture improvement roadmap that
