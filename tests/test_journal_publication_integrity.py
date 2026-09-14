@@ -172,6 +172,23 @@ def test_cancel_cannot_replace_successful_terminal(tmp_path):
     assert run_journal.latest_run_summary("sid", "run")["terminal_state"] == "completed"
 
 
+@pytest.mark.parametrize("terminal", ["done", "apperror", "error", "cancel", "stream_end"])
+def test_live_late_cancel_cannot_replace_any_settled_terminal(tmp_path, terminal):
+    writer = run_journal.RunJournalWriter("sid", "run", session_dir=tmp_path)
+    channel = config.StreamChannel()
+    subscriber, _ = channel.subscribe_with_snapshot()
+    first = streaming._publish_stream_event(writer, channel, "run", terminal, {})
+    assert subscriber.get_nowait()[2] == first["event_id"]
+    # A separate writer models HTTP Stop racing a worker that already settled.
+    late_writer = run_journal.RunJournalWriter("sid", "run", session_dir=tmp_path)
+    assert streaming._publish_stream_event(late_writer, channel, "run", "cancel", {}) is None
+    assert subscriber.empty()
+    assert config.STREAM_LAST_EVENT_ID["run"] == first["event_id"]
+    assert run_journal.read_run_events("sid", "run")["events"] == [first]
+    run_journal._discard_cached_summary(writer._path)
+    assert run_journal.latest_run_summary("sid", "run")["terminal_state"] == first["terminal_state"]
+
+
 def test_interrupt_provider_error_cannot_beat_durable_cancel(tmp_path):
     _, _, put = _running_session(tmp_path)
     config.AGENT_INSTANCES["run"].interrupt.side_effect = lambda _message: put(
