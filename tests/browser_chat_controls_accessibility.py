@@ -1,6 +1,7 @@
 """Keyboard regression gate using the real WebUI and deterministic Gateway (no model)."""
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 
@@ -166,7 +167,8 @@ def main():
         browser.close()
     (OUT / 'results.json').write_text(json.dumps(results, indent=2))
     print(json.dumps(results, indent=2))
+    return 0 if len(results) == 9 and all(row['passed'] for row in results) else 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
