@@ -97,8 +97,31 @@ def main():
                         assert any('Conclusão complementar' in str(m.get('content')) for m in actual)
                         geometry = page.evaluate('({width:innerWidth,scrollWidth:document.documentElement.scrollWidth,groups:document.querySelectorAll(".background-activity-group").length})')
                         assert geometry['scrollWidth'] <= width + (16 if width == 1440 else 0)
+                        # Exercise the real paginated API and full-content button,
+                        # not a local expansion of a clipped string.
+                        complete = 'Large report. ' * 2000 + 'FINAL_FULL_CONTENT_MARKER'
+                        full_sid = page.evaluate('''async content => {
+                          const r=await fetch('/api/session/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'Full content regression',messages:[{role:'user',content:'Show report'},{role:'assistant',content}]})});
+                          if(!r.ok) throw new Error('Import failed '+r.status);
+                          const d=await r.json();await loadSession(d.session.session_id);return d.session.session_id;
+                        }''', complete)
+                        page.wait_for_selector('#fullTranscriptPreview button')
+                        assert page.evaluate('S.messages.some(m=>m._content_truncated)')
+                        rect=page.locator('#fullTranscriptPreview button').bounding_box()
+                        assert rect and 0 <= rect['y'] < height, 'full-content action must stay reachable while scrolled'
+                        page.screenshot(path=str(output/f'{width}-full-content-preview.png'), full_page=True)
+                        page.locator('#fullTranscriptPreview button').click()
+                        page.wait_for_function('() => !S.messages.some(m=>m._content_truncated)')
+                        assert page.locator('#fullTranscriptPreview').count() == 0
+                        assert page.evaluate('S.messages[S.messages.length-1].content') == complete
+                        persisted = context.request.get(f'/api/session?session_id={full_sid}&messages=1').json()
+                        assert persisted.get('session', persisted)['messages'][-1]['content'] == complete
+                        # Nested/tool-only previews must expose the same action.
+                        page.evaluate("S.session.tool_calls=[{_content_truncated:true}];syncFullTranscriptPreview()")
+                        assert page.locator('#fullTranscriptPreview button').is_visible()
+                        page.evaluate('S.session.tool_calls=[];syncFullTranscriptPreview()')
                         assert not errors, errors
-                        results.append({'viewport': [width, height], 'session': sid, 'geometry': geometry, 'errors': errors, 'passed': True})
+                        results.append({'viewport': [width, height], 'session': sid, 'geometry': geometry, 'errors': errors, 'full_content_button': True, 'passed': True})
                         context.close()
                 finally:
                     browser.close()

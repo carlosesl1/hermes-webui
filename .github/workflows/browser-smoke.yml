@@ -128,6 +128,7 @@ jobs:
           CHAT_A11Y_ARTIFACT_DIR: ${{ runner.temp }}/chat-browser/controls
         run: |
           python tests/browser_background_activity.py
+          python tests/browser_background_tasks.py
           python tests/browser_chat_controls_accessibility.py
 
       - name: Upload chat browser evidence

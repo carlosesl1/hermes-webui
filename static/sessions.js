@@ -3742,7 +3742,7 @@ async function _loadOlderMessages() {
       if (!boundary || !first || identityFields.some(key =>
           JSON.stringify(boundary[key] ?? null) !== JSON.stringify(first[key] ?? null))) {
         console.warn('History changed while paging; reload the conversation before loading older messages.');
-        if (typeof toast === 'function') toast('History changed. Reload the conversation to load older messages.', 'warning');
+        if (typeof showToast === 'function') showToast(t('history_paging_changed'));
         return;
       }
     }
@@ -3906,6 +3906,35 @@ async function expandFullTranscript() {
   const sid = S.session?.session_id;
   await _ensureAllMessagesLoaded(true);
   if (S.session?.session_id === sid) renderMessages({ preserveScroll: true });
+}
+
+function syncFullTranscriptPreview(){
+  const inner=$('msgInner');
+  if(!inner) return;
+  let notice=$('fullTranscriptPreview');
+  const clipped=(S.messages||[]).some(m=>m&&m._content_truncated)
+    || (S.session?.tool_calls||[]).some(tc=>tc&&tc._content_truncated);
+  if(!S.session||!clipped){if(notice) notice.remove();return;}
+  const sid=S.session.session_id;
+  if(notice&&notice.dataset.sessionId!==sid){notice.remove();notice=null;}
+  if(!notice){
+    notice=document.createElement('section');
+    notice.id='fullTranscriptPreview';notice.className='messages-inner';
+    notice.dataset.sessionId=sid;
+    notice.style.cssText='position:sticky;top:0;z-index:5;background:var(--bg);padding-top:8px;padding-bottom:8px;font-size:12px;color:var(--text-muted);overflow-wrap:anywhere';
+    const label=document.createElement('span');label.textContent=t('history_preview_notice')+' ';
+    const button=document.createElement('button');
+    button.type='button';button.className='full-transcript-preview-button';button.textContent=t('history_preview_expand');
+    button.style.cssText='align-self:flex-start;min-height:32px;padding:5px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font:inherit;cursor:pointer';
+    button.onclick=async()=>{
+      if(S.session?.session_id!==sid) return;
+      button.disabled=true;
+      try{await expandFullTranscript();}
+      catch(error){if(S.session?.session_id===sid) showToast(t('history_preview_error'));}
+      finally{button.disabled=false;syncFullTranscriptPreview();}
+    };
+    notice.append(label,button);inner.before(notice);
+  }
 }
 
 const SESSION_ARCHIVED_PAGE_SIZE = 100;

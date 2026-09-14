@@ -88,12 +88,12 @@ with sync_playwright() as p:
     assert third.evaluate("requests.length") == 1
     assert third.evaluate("timers.size") == 0
     artifacts = os.environ.get("BACKGROUND_ARTIFACT_DIR")
-    for width in (1440, 900, 390):
-        page.set_viewport_size({"width": width, "height": 900})
+    for width, height in ((1440, 900), (522, 1232), (390, 844)):
+        page.set_viewport_size({"width": width, "height": height})
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         if artifacts:
             dest = Path(artifacts)
             dest.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(dest / f"background-{width}.png"), full_page=True)
     browser.close()
-print(json.dumps({"result":"passed","checks":["siblings","repeatable snapshot","no chat injection","safe disclosure","running/completed rehydrate","navigation","teardown","1440/900/390 widths"]}))
+print(json.dumps({"result":"passed","checks":["siblings","repeatable snapshot","no chat injection","safe disclosure","running/completed rehydrate","navigation","teardown","1440x900/522x1232/390x844"]}))

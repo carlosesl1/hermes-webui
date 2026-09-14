@@ -3,6 +3,15 @@
 
 ## [Unreleased]
 
+### Fork: background activity and chat reliability
+
+- Trusted background continuations use a compact, keyboard-accessible disclosure without deleting the original transcript. Deferred sibling process updates can share one bounded continuation; rejected admission retains their payloads. Source-less legacy messages and virtualized spacer windows keep a conservative flat presentation.
+- `/background` tasks now keep parent-scoped, repeatable results in SQLite, recover completed work after reload, mark abandoned tasks interrupted after restart, and no longer inject results as assistant messages into whichever chat happens to be open.
+- Journal allocation, append and live publication are ordered together. User cancellation writes an idempotent durable terminal while preserving the worker-unwinding admission guard.
+- Intermediate delegation notices no longer consume the final batch identity. Credential-paused or busy admission refunds supported durable delivery claims instead of exhausting delivery retries.
+- Older history uses cursor-first pages with bounded text previews. An explicit full-content action and hydrated Markdown downloads preserve access to the complete transcript.
+- Reasoning controls support keyboard selection; closed workspace panels cannot receive invisible focus; busy-send behavior has an accessible description. Browser regression gates cover background activity and keyboard controls in CI.
+
 ### Fixed
 
 - **Opening a session no longer stalls just because Codex refreshed its model cache in the background.** The WebUI keys its 24-hour `/api/models` cache partly on Codex's `~/.codex/models_cache.json`, but that file was fingerprinted by `mtime` + size — and Codex rewrites it on its own refresh timer, bumping those stat fields even when the model catalog is byte-identical (only a volatile `fetched_at` timestamp changed). Every Codex refresh therefore invalidated the cache, and the next session open paid a full live rebuild whose serial provider probes stalled the open (#7540). The Codex cache is now fingerprinted by its *content* with the refresh-timestamp fields (`fetched_at`, `updated_at`) stripped, so a timestamp-only rewrite keeps the cache while any genuine catalog change (models, `etag`, `client_version`) still invalidates it. A malformed or pathologically deep cache file degrades safely to the old stat fingerprint rather than erroring. Thanks @webtecnica. (#7556, closes #7540)

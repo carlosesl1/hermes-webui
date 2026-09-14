@@ -33,14 +33,15 @@ an arbitrary-JSON structural cap.
 Clipped rows and tool summaries carry `_content_truncated` and
 `_full_content_url`. That authenticated URL returns the full merged transcript
 JSON without preview clipping. It retains normal public redaction. The browser
-also exposes `expandFullTranscript()` for a renderer's explicit full-content
-control. It reloads the complete transcript and re-renders; it is intentionally
-not a background fetch. `_ensureAllMessagesLoaded()` detects clipped content
+exposes a **Load complete content** button above the transcript whenever any
+message or nested/tool-only preview was clipped. It calls
+`expandFullTranscript()`, reloads the complete transcript and re-renders;
+it is intentionally not a background fetch. `_ensureAllMessagesLoaded()` detects clipped content
 even when every history row has already been loaded, including session-level
-tool-only previews. Renderer integrations must expose the full-content action
-for both message text and nested/tool-only clipping, not merely expand a local
-clipped string. Markdown download currently serializes the loaded browser
-transcript; do not present that as a lossless export of previews.
+tool-only previews. The full-content action performs an authenticated read,
+not merely local expansion of a clipped string. Markdown download first hydrates
+the full transcript and refuses to export on a failed load/session switch;
+JSON/HTML exports retain their existing server-side full-content paths.
 
 ## Verification
 
