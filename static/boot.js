@@ -154,6 +154,7 @@ async function _finalizeComposerPrefillOnBoot(prefillIntent){
 
 // Mobile navigation.
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
+let _workspacePanelReturnFocus=null;
 
 function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
@@ -359,6 +360,17 @@ function syncWorkspacePanelUI(){
   const mobileOpen=panel.classList.contains('mobile-open');
   const isCompact=_isCompactWorkspaceViewport();
   const isOpen=isCompact?mobileOpen:desktopOpen;
+  // Off-canvas positioning/opacity alone does not remove keyboard focus.
+  // Include CSS-hidden tablet states so resize never strands focus in a pane.
+  const accessibleOpen=isOpen&&(typeof getComputedStyle!=='function'||getComputedStyle(panel).display!=='none');
+  if(!accessibleOpen&&panel.contains(document.activeElement)){
+    const target=[_workspacePanelReturnFocus,toggleBtn,edgeToggleBtn,$('msg')]
+      .find(el=>el&&el.isConnected&&!el.disabled&&el.getClientRects().length);
+    if(target) target.focus({preventScroll:true});
+  }
+  panel.inert=!accessibleOpen;
+  panel.setAttribute('aria-hidden',accessibleOpen?'false':'true');
+  if(!isOpen) _workspacePanelReturnFocus=null;
   const canBrowse=!!S.session||_hasWorkspacePreviewVisible()||!!(S._profileDefaultWorkspace);
   const hasPreview=_hasWorkspacePreviewVisible();
   if(toggleBtn){
@@ -611,8 +623,16 @@ function toggleWorkspacePanel(force){
     closeWorkspacePanel();
     return;
   }
+  const trigger=document.activeElement;
+  const fromControl=trigger&&(trigger===$('btnWorkspacePanelToggle')||trigger===$('btnWorkspacePanelEdgeToggle'));
+  if(fromControl) _workspacePanelReturnFocus=trigger;
   const nextMode=_hasWorkspacePreviewVisible()?'preview':'browse';
   openWorkspacePanel(nextMode);
+  if(fromControl&&!panel.inert){
+    const target=[$('btnClearPreview'),$('workspaceFilesTab')]
+      .find(el=>el&&!el.disabled&&el.getClientRects().length);
+    target?.focus({preventScroll:true});
+  }
 }
 function mobileSwitchPanel(name){
   switchPanel(name);
@@ -2501,6 +2521,12 @@ document.addEventListener('keydown',async e=>{
     return;
   }
   if(e.key==='Escape'){
+    const workspacePanel=document.querySelector('.rightpanel');
+    if(workspacePanel&&!workspacePanel.inert&&workspacePanel.contains(e.target)){
+      e.preventDefault();
+      closeWorkspacePanel();
+      return;
+    }
     // Close onboarding overlay if open (skip/dismiss the wizard)
     const onboardingOverlay=$('onboardingOverlay');
     if(onboardingOverlay&&onboardingOverlay.style.display!=='none'){
