@@ -53,6 +53,7 @@ from api.process_event_utils import (
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
+    defer_async_delegation_delivery,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
@@ -1059,23 +1060,31 @@ def _start_async_delegation_wakeup_turn(
                 )
                 return
 
+            if status == 409 and (resp or {}).get("error") in {
+                "process_wakeup_paused", "session already has an active stream", "busy",
+            }:
+                # The idle check races admission. Credential pauses and a new
+                # foreground owner did not attempt delivery; refund the claim.
+                if defer_async_delegation_delivery(evt, claim):
+                    logger.info(
+                        "async delegation admission deferred for session %s: %s",
+                        session_id, (resp or {}).get("error"),
+                    )
+                    _retry_unclaimed_async_delegation_event(
+                        process_registry, evt, keep_legacy_retrying=True
+                    )
+                return
             release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
                 process_registry, evt, keep_legacy_retrying=True
             )
-            if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
-                logger.info(
-                    "async delegation wakeup paused for session %s; delivery remains retryable",
-                    session_id,
-                )
-            else:
-                logger.debug(
-                    "async delegation wakeup not accepted for session %s: "
-                    "status=%s err=%r; durable retry scheduled",
-                    session_id,
-                    status,
-                    (resp or {}).get("error"),
-                )
+            logger.debug(
+                "async delegation wakeup not accepted for session %s: "
+                "status=%s err=%r; durable retry scheduled",
+                session_id,
+                status,
+                (resp or {}).get("error"),
+            )
         except Exception:
             release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
