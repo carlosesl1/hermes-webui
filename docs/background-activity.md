@@ -46,6 +46,16 @@ server errors and dispatch exceptions retain the entire batch for a later
 turn/recovery hook, without introducing a timer retry loop. This does not promise that a model will never produce an acknowledgement;
 the browser grouping is deterministic and does not depend on model compliance.
 
+A queued retry with a server-generated `wakeup-batch-` identity is indivisible:
+it is dispatched unchanged and is never combined with overflow, another batch,
+or newly arrived completions. Entries preceding it may form a separate batch;
+entries after it remain queued. This preserves FIFO order of the current queue
+and the exact retry identity without nesting envelopes or resetting their counts.
+A 409 can already append the rejected batch after queued overflow; this fix does
+not change that existing queue policy or promise original-arrival FIFO across
+rejected admissions. A matching header in ordinary tool output is not batch
+provenance.
+
 The completion queue and older-core process registry have existing lifetime
 limits. This batching patch does not introduce a new durable queue or promise
 that a killed OS process resumes after server restart. `/background` task
@@ -59,6 +69,9 @@ tracking is a separate mechanism with its own persistence contract.
   human-turn ownership, no transcript mutation, failure classification.
 - `tests/test_background_wakeup_batching.py`: one continuation for siblings,
   byte/event budget and lossless overflow.
+- `tests/test_background_batch_retry.py`: full-batch rejection plus overflow,
+  repeated retry identity, first/middle/last/sibling batch barriers and
+  preservation across busy, paused, server-error and exception outcomes.
 - `tests/test_wakeup_defer_race.py`: actual idle-hook dispatch and admission
   races, now asserting the new bounded group contract.
 - `tests/browser_background_activity.py`: actual session import/load API,

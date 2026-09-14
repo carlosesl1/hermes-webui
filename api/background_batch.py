@@ -28,6 +28,14 @@ def coalesce_wakeup_entries(entries: list[dict]) -> tuple[str, str, list[dict]]:
     chosen = []
     size = len(_BATCH_HEADER.encode()) + 64  # counts/header reserve
     for entry in valid:
+        # This server-assigned namespace survives admission requeue unchanged.
+        # Retry envelopes are FIFO barriers, not one more constituent event:
+        # merging them would nest headers, exceed budgets and change identity.
+        # Do not classify arbitrary tool text by a matching prompt header.
+        if str(entry.get('process_id') or '').startswith('wakeup-batch-'):
+            if chosen:
+                break
+            return str(entry['wakeup_prompt']), str(entry['process_id']), valid[1:]
         cost = len(str(entry['wakeup_prompt']).encode('utf-8')) + 2
         if chosen and (len(chosen) >= MAX_BATCH_EVENTS or size + cost > MAX_BATCH_BYTES):
             break
