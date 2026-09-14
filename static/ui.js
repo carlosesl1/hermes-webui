@@ -5472,7 +5472,8 @@ function closeReasoningDropdown(){
 // Capture before global shortcuts: Escape must only dismiss this picker.
 document.addEventListener('keydown',function(e){
   const dd=$('composerReasoningDropdown');
-  if(!dd||e.isComposing) return;
+  if(!dd) return;
+  if(window._isImeEnter && window._isImeEnter(e)) return;
   const trigger=e.target.closest('#composerReasoningChip,#composerMobileReasoningAction');
   if(trigger&&(e.key==='ArrowDown'||e.key==='ArrowUp')){
     e.preventDefault();e.stopImmediatePropagation();

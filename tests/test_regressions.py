@@ -793,7 +793,8 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
     ui_src = (REPO_ROOT / "static/ui.js").read_text()
     fn_start = ui_src.find("function renderMessages")
     assert fn_start >= 0, "renderMessages() not found in ui.js"
-    fn_body = ui_src[fn_start:fn_start + 1400]
+    fn_end = ui_src.index("  let cachedRenderSignature=", fn_start)
+    fn_body = ui_src[fn_start:fn_end]
 
     compact = re.sub(r"\s+", "", fn_body)
     assert (

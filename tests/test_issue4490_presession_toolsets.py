@@ -120,7 +120,8 @@ def test_load_existing_session_clears_staged_toolsets():
     compact = body.replace(" ", "")
     assign = compact.index("S.session=data.session")
     # The clear must accompany the real-session assignment, not only the create path.
-    assert "S._pendingSessionToolsets=null" in compact[assign : assign + 400]
+    refresh = compact.index("if(typeofpopulateModelDropdown", assign)
+    assert "S._pendingSessionToolsets=null" in compact[assign:refresh]
 
 
 def test_workspace_and_profile_switches_clear_pending_toolsets():
