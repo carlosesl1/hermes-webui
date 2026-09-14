@@ -120,3 +120,22 @@ jobs:
       - name: Run browser smoke
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_smoke.py
+
+      - name: Verify background activity and keyboard controls
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          BACKGROUND_ACTIVITY_ARTIFACT_DIR: ${{ runner.temp }}/chat-browser/background
+          CHAT_A11Y_ARTIFACT_DIR: ${{ runner.temp }}/chat-browser/controls
+        run: |
+          python tests/browser_background_activity.py
+          python tests/browser_background_tasks.py
+          python tests/browser_background_live.py
+          python tests/browser_chat_controls_accessibility.py
+
+      - name: Upload chat browser evidence
+        if: always() && needs.changes.outputs.docs_only != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-browser-evidence
+          path: ${{ runner.temp }}/chat-browser
+          if-no-files-found: ignore

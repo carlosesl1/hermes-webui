@@ -66,6 +66,7 @@ def _install_fake_durable_delivery_api(monkeypatch):
         "claim": [],
         "complete": [],
         "release": [],
+        "defer": [],
         "mark": [],
         "legacy": [],
         "delivery_state": "pending",
@@ -116,6 +117,12 @@ def _install_fake_durable_delivery_api(monkeypatch):
         calls["legacy"].append(delegation_id)
         return True
 
+    def _defer(delegation_id, claim_id):
+        calls["defer"].append((delegation_id, claim_id))
+        calls["delivery_attempts"] -= 1
+        return True
+
+    fake_mod.defer_completion_delivery = _defer
     fake_mod.claim_event_delivery = _claim
     fake_mod.complete_event_delivery = _complete
     fake_mod.release_event_delivery = _release
@@ -539,7 +546,11 @@ def test_autonomous_wakeup_rejection_uses_bounded_durable_retry(monkeypatch, sta
             process_registry=registry,
         )
 
-        assert _wait_until(lambda: len(delivery["release"]) == 1)
+        outcome = "defer" if status == 409 else "release"
+        assert _wait_until(lambda: len(delivery[outcome]) == 1)
+        if status == 409:
+            assert delivery["release"] == []
+            assert delivery["delivery_attempts"] == 0
         assert delivery["complete"] == []
         assert registry.completion_queue.empty()
         assert peu.async_delivery_retry_timer_count() == 1
@@ -1176,6 +1187,58 @@ print(json.dumps({{
 # Neither PR alone exercises the interaction where the origin return address
 # overrides the mutable session-key index AND the routed delivery still flows
 # through the durable claim/complete ack. These guard the combine seam.
+
+
+@pytest.mark.parametrize("consumer", ["background", "next-turn"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_failure_notices_preserve_final_delivery_and_exact_owner(monkeypatch, consumer, legacy):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = (_install_fake_legacy_delivery_api(monkeypatch) if legacy
+                else _install_fake_durable_delivery_api(monkeypatch))
+    cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "wrong-session"
+    accepted = []
+
+    def accept(session_id, prompt, *, evt, claim, **kwargs):
+        accepted.append((session_id, peu.completion_delivery_id(evt)))
+        bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
+
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda sid: False)
+    monkeypatch.setattr(bp, "_start_async_delegation_wakeup_turn", accept)
+    monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *args: 1)
+    try:
+        for index in (0, 1):
+            notice = _async_delegation_event(
+                origin_ui_session_id="owner", task_failure_notice=True,
+                results=[{"task_index": index, "status": "error"}],
+            )
+            if consumer == "background":
+                bp._process_one(notice)
+                bp._process_one(dict(notice))
+            else:
+                registry.completion_queue.put(notice)
+                registry.completion_queue.put(dict(notice))
+                assert streaming._drain_webui_process_notifications("wrong-session") == []
+                notes = streaming._drain_webui_process_notifications("owner")
+                assert len(notes) == 1
+                accepted.append(("owner", peu.completion_delivery_id(notice)))
+        assert len(accepted) == 2
+        assert all(sid == "owner" for sid, ident in accepted)
+        assert len({ident for sid, ident in accepted}) == 2
+        assert delivery["mark"] == []
+        assert delivery["legacy"] == []
+        if not legacy:
+            assert delivery["claim"] == delivery["complete"] == []
+        registry.completion_queue.put(_async_delegation_event(origin_ui_session_id="owner"))
+        assert streaming._drain_webui_process_notifications("wrong-session") == []
+        assert len(streaming._drain_webui_process_notifications("owner")) == 1
+        if legacy:
+            assert delivery["mark"] == ["deleg_test123"]
+        else:
+            assert len(delivery["claim"]) == len(delivery["complete"]) == 1
+        assert registry._completion_consumed == set()
+    finally:
+        _reset_wakeup_state()
 
 
 def test_origin_ui_session_id_overrides_index_and_still_acks(monkeypatch):

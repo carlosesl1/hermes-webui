@@ -12,7 +12,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -394,14 +394,39 @@ def append_run_event(
     session_dir: Path | None = None,
     seq: int | None = None,
     created_at: float | None = None,
-) -> dict:
-    """Append one durable run event and fsync it according to the journal policy."""
+    publish: Callable[[dict], None] | None = None,
+    cancel_safe: bool = False,
+    should_append: Callable[[], bool] | None = None,
+) -> dict | None:
+    """Allocate, append, and publish under the per-run lock.
+
+    Terminal events are fsynced before publication. ``publish`` must not acquire
+    session locks or reenter this journal; it may only update transport state.
+    Live writers opt into a durable, cross-writer cancellation fence.
+    """
     path = _run_path(session_id, run_id, session_dir=session_dir)
     payload = payload if payload is not None else {}
     event_name = str(event_name or "").strip()
     if not event_name:
         raise ValueError("event_name is required")
     with _lock_for(path):
+        # Recheck cancellation after acquiring the lock: a callback may have
+        # passed its fast-path guard before HTTP Stop signalled the worker.
+        if should_append is not None and not should_append():
+            return None
+        # Live writers use a durable cancellation fence shared across writer
+        # instances (including HTTP cancel and the unwinding worker). A late
+        # Stop must not replace a completed run. Legacy raw journal imports
+        # retain their explicit-sequence/terminal reconciliation semantics.
+        summary = (
+            latest_run_summary(session_id, run_id, session_dir=session_dir)
+            if cancel_safe else None
+        )
+        if cancel_safe and summary and (
+            summary.get("terminal_state") == "interrupted-by-user"
+            or (event_name == "cancel" and summary.get("terminal"))
+        ):
+            return None
         if seq is not None:
             assigned_seq = int(seq)
             _note_assigned_seq(path, assigned_seq)
@@ -430,9 +455,27 @@ def append_run_event(
             fh.flush()
             if _should_fsync_event(terminal_state):
                 os.fsync(fh.fileno())
-        _discard_cached_summary(path)
+        if summary is not None and event_name != "stream_end":
+            # Keep the existing stat-validated, bounded summary cache warm:
+            # cancellation fencing must not reparse the entire run per token.
+            summary["event_count"] += 1
+            summary.update(last_seq=assigned_seq, last_event_id=event["event_id"], last_event=event_name)
+            if terminal_state:
+                summary.update(terminal=True, terminal_state=terminal_state)
+            elif not summary["terminal"]:
+                summary["terminal_state"] = "running"
+            _cache_summary(path, summary, expected_signature=_summary_cache_signature(path))
+        else:
+            # Raw imports retain full terminal reconciliation. Transport-end
+            # rows also need that reconciliation (semantic terminals take
+            # priority, otherwise the latest stream_end owns the outcome).
+            _discard_cached_summary(path)
         if created_file:
             _fsync_parent_dir(path)
+        # Publication is part of the same transaction as allocation + append.
+        # Callbacks must be nonblocking and must not acquire session locks.
+        if publish is not None:
+            publish(event)
         return event
 
 
@@ -446,19 +489,21 @@ class RunJournalWriter:
         self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
         self._lock = _lock_for(self._path)
 
-    def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+    def append_sse_event(
+        self, event_name: str, payload=None, *, publish: Callable[[dict], None] | None = None,
+        should_append: Callable[[], bool] | None = None,
+    ) -> dict | None:
+        # Never reserve outside append's critical section: a metering callback
+        # could otherwise append seq=2 before the worker appends seq=1.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
+            publish=publish,
+            cancel_safe=True,
+            should_append=should_append,
         )
 
 

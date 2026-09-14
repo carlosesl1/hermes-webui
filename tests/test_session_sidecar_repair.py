@@ -984,7 +984,13 @@ class TestNonEmptyMessagesPendingCleared:
     def test_gateway_terminal_error_uses_authoritative_latest_terminal_event(
         self, hermes_home, monkeypatch, tmp_path, later_event_name, expected_error,
     ):
-        """Later terminal evidence supersedes an older error, except transport-only stream_end."""
+        """Reconcile legacy multi-terminal journals, not live cancellation writes.
+
+        Live writers reject cancel after a settled outcome. Raw imported journals
+        can still contain it; recovery must honor the latest semantic terminal.
+        """
+        from api.run_journal import append_run_event
+
         sid = f"gateway_terminal_latest_{later_event_name}"
         stream_id = f"{sid}_stream"
         stale = _make_session(
@@ -1005,7 +1011,6 @@ class TestNonEmptyMessagesPendingCleared:
             live_messages=stale.messages,
         )
 
-        writer = RunJournalWriter(sid, stream_id)
         later_payload = {"session_id": sid}
         later_terminal = None
         if later_event_name == "apperror":
@@ -1016,9 +1021,10 @@ class TestNonEmptyMessagesPendingCleared:
                 if message.get("_error") is True
             )
             later_message["content"] = expected_error
-            later_terminal = writer.append_sse_event("apperror", later_payload)
-        else:
-            writer.append_sse_event(later_event_name, later_payload)
+        appended = append_run_event(sid, stream_id, later_event_name, later_payload)
+        assert appended is not None and appended["seq"] > first_terminal["seq"]
+        if later_event_name == "apperror":
+            later_terminal = appended
         models.SESSIONS.pop(sid, None)
 
         recovered = models.get_session(sid)

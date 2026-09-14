@@ -1,35 +1,102 @@
-"""Background and ephemeral task tracking for /background and /btw commands."""
+"""Durable /background tasks; /btw remains an ephemeral side conversation.
+
+The WebUI server owns the worker threads. Opening this store in a new server
+lifetime marks unfinished work interrupted; it does not resume those threads.
+Results are separate from the parent's transcript and are never consumed by GET.
+"""
 from __future__ import annotations
 
-import logging
+from contextlib import contextmanager
+import sqlite3
 import threading
 import time
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from api.config import STATE_DIR
 
 _lock = threading.Lock()
-
-# parent_session_id -> list of task dicts
-_BACKGROUND_TASKS: dict[str, list[dict[str, Any]]] = {}
-
-# btw ephemeral session tracking: parent_sid -> {ephemeral_sid, stream_id, question}
+_ready_path = None
+_TERMINAL = {"done", "error", "no_response", "cancelled", "interrupted"}
 _BTW_TRACKING: dict[str, dict[str, Any]] = {}
+
+
+@contextmanager
+def _store():
+    """Serialize initialization/writes in the single WebUI server process."""
+    global _ready_path
+    path = STATE_DIR / "background_tasks.sqlite3"
+    with _lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(path, timeout=10)
+        db.row_factory = sqlite3.Row
+        try:
+            with db:
+                if _ready_path != path:
+                    db.execute("""CREATE TABLE IF NOT EXISTS background_tasks (
+                        parent_session_id TEXT NOT NULL,
+                        task_id TEXT NOT NULL,
+                        bg_session_id TEXT NOT NULL,
+                        stream_id TEXT NOT NULL,
+                        prompt TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at REAL NOT NULL,
+                        answer TEXT,
+                        completed_at REAL,
+                        error TEXT,
+                        PRIMARY KEY (parent_session_id, task_id)
+                    )""")
+                    db.execute("""UPDATE background_tasks
+                        SET status='interrupted', completed_at=?, error=?
+                        WHERE status='running'""", (
+                        time.time(),
+                        "Server restarted before the result was saved. Task was not resumed.",
+                    ))
+            _ready_path = path
+            with db:
+                yield db
+        finally:
+            db.close()
 
 
 def track_background(parent_sid: str, bg_sid: str, stream_id: str,
                      task_id: str, prompt: str) -> None:
-    with _lock:
-        _BACKGROUND_TASKS.setdefault(parent_sid, []).append({
-            "task_id": task_id,
-            "bg_session_id": bg_sid,
-            "stream_id": stream_id,
-            "prompt": prompt,
-            "status": "running",
-            "started_at": time.time(),
-            "answer": None,
-            "completed_at": None,
-        })
+    with _store() as db:
+        db.execute("""INSERT INTO background_tasks
+            (parent_session_id, task_id, bg_session_id, stream_id, prompt, status, started_at)
+            VALUES (?, ?, ?, ?, ?, 'running', ?)""",
+            (parent_sid, task_id, bg_sid, stream_id, prompt, time.time()))
+
+
+def complete_background(parent_sid: str, task_id: str, answer: str,
+                        *, status: str = "done", error: str | None = None) -> bool:
+    """Commit a terminal result before child cleanup; first completion wins.
+
+    Persistence errors propagate so callers retain the child's session file.
+    False means this exact result is not stored and cleanup is not safe.
+    """
+    if status not in _TERMINAL:
+        raise ValueError("Invalid background terminal status")
+    with _store() as db:
+        db.execute("""UPDATE background_tasks
+            SET status=?, answer=?, completed_at=?, error=?
+            WHERE parent_session_id=? AND task_id=? AND status='running'""",
+            (status, answer, time.time(), error, parent_sid, task_id))
+        return db.execute("""SELECT 1 FROM background_tasks
+            WHERE parent_session_id=? AND task_id=? AND status=?
+                AND answer IS ? AND error IS ?""",
+            (parent_sid, task_id, status, answer, error)).fetchone() is not None
+
+
+def get_results(parent_sid: str) -> list[dict[str, Any]]:
+    """Idempotent terminal snapshot, safe for retries, siblings and multiple tabs."""
+    return [task for task in get_background_tasks(parent_sid) if task["status"] != "running"]
+
+
+def get_background_tasks(parent_sid: str) -> list[dict[str, Any]]:
+    """Detached, ordered snapshot including running and completed tasks."""
+    with _store() as db:
+        return [dict(row) for row in db.execute("""SELECT * FROM background_tasks
+            WHERE parent_session_id=? ORDER BY started_at, task_id""", (parent_sid,))]
 
 
 def track_btw(parent_sid: str, ephemeral_sid: str, stream_id: str,
@@ -40,45 +107,6 @@ def track_btw(parent_sid: str, ephemeral_sid: str, stream_id: str,
             "stream_id": stream_id,
             "question": question,
         }
-
-
-def complete_background(parent_sid: str, task_id: str, answer: str) -> None:
-    with _lock:
-        for t in _BACKGROUND_TASKS.get(parent_sid, []):
-            if t["task_id"] == task_id and t["status"] == "running":
-                t["status"] = "done"
-                t["answer"] = answer
-                t["completed_at"] = time.time()
-                break
-
-
-def get_results(parent_sid: str) -> list[dict[str, Any]]:
-    """Return completed background task results and remove only the done ones
-    from tracking.  Tasks still in ``status="running"`` MUST stay in the list
-    so that ``complete_background()`` can still find them when the worker
-    thread finishes — otherwise the first poll during a long-running task
-    silently drops it and the result is lost forever.
-    """
-    with _lock:
-        tasks = _BACKGROUND_TASKS.get(parent_sid, [])
-        done = [t for t in tasks if t["status"] == "done"]
-        still_running = [t for t in tasks if t["status"] != "done"]
-        if still_running:
-            _BACKGROUND_TASKS[parent_sid] = still_running
-        else:
-            _BACKGROUND_TASKS.pop(parent_sid, None)
-        return [{
-            "task_id": t["task_id"],
-            "prompt": t["prompt"],
-            "answer": t["answer"],
-            "completed_at": t["completed_at"],
-        } for t in done]
-
-
-def get_background_tasks(parent_sid: str) -> list[dict[str, Any]]:
-    """Return all background tasks (running and done) for a parent session."""
-    with _lock:
-        return list(_BACKGROUND_TASKS.get(parent_sid, []))
 
 
 def cleanup_btw(parent_sid: str) -> dict[str, Any] | None:

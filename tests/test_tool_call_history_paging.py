@@ -15,7 +15,15 @@ def test_sessions_js_resyncs_tool_calls_after_history_window_replacement():
     """
     assert "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls)" in SESSIONS_JS
     assert "_syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
-    assert "S.messages = nextMessages;\n    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);" in SESSIONS_JS
+    paging = SESSIONS_JS[SESSIONS_JS.index("async function _loadOlderMessages()"):
+                         SESSIONS_JS.index("async function _ensureAllMessagesLoaded(")]
+    assign = paging.index("S.messages = nextMessages;")
+    sync = paging.index("_syncToolCallsForLoadedMessages(nextMessages, combinedTools);")
+    render = paging.index("renderMessages({ preserveScroll: true });")
+    assert assign < sync < render
+    assert "...pageTools" in paging[assign:sync]
+    assert "...retainedTools.map" in paging[assign:sync]
+    assert "tc.assistant_msg_idx + olderMsgs.length" in paging[assign:sync]
     assert "S.messages = _msgsToAssign;\n    _messagesTruncated = false;\n    _oldestIdx = 0;\n    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
 
 

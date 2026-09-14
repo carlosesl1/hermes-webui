@@ -5397,7 +5397,18 @@ function _highlightReasoningOption(effort){
   if(!dd) return;
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     opt.classList.toggle('selected',opt.dataset.effort===effort);
+    opt.setAttribute('aria-selected',opt.dataset.effort===effort?'true':'false');
   });
+}
+
+let _reasoningReturnFocus=null;
+
+function _focusReasoningOption(option){
+  const dd=$('composerReasoningDropdown');
+  if(!dd||!option) return;
+  dd.querySelectorAll('.reasoning-option').forEach(opt=>{opt.tabIndex=opt===option?0:-1;});
+  option.focus({preventScroll:true});
+  option.scrollIntoView({block:'nearest'});
 }
 
 function toggleReasoningDropdown(){
@@ -5406,6 +5417,7 @@ function toggleReasoningDropdown(){
   if(!dd||!chip) return;
   const open=dd.classList.contains('open');
   if(open){closeReasoningDropdown();return;}
+  _reasoningReturnFocus=document.activeElement;
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
@@ -5416,6 +5428,9 @@ function toggleReasoningDropdown(){
   chip.classList.add('active');
   const mobileAction=$('composerMobileReasoningAction');
   if(mobileAction) mobileAction.classList.add('active');
+  [chip,mobileAction].forEach(el=>{if(el) el.setAttribute('aria-expanded','true');});
+  const options=Array.from(dd.querySelectorAll('.reasoning-option')).filter(opt=>opt.style.display!=='none');
+  _focusReasoningOption(options.find(opt=>opt.classList.contains('selected'))||options[0]);
 }
 
 function _positionReasoningDropdown(){
@@ -5438,10 +5453,55 @@ function closeReasoningDropdown(){
   const dd=$('composerReasoningDropdown');
   const chip=$('composerReasoningChip');
   const mobileAction=$('composerMobileReasoningAction');
-  if(dd) dd.classList.remove('open');
-  if(chip) chip.classList.remove('active');
-  if(mobileAction) mobileAction.classList.remove('active');
+  const restore=dd&&dd.contains(document.activeElement);
+  if(dd){
+    dd.classList.remove('open');
+    dd.querySelectorAll('.reasoning-option').forEach(opt=>{opt.tabIndex=-1;});
+  }
+  [chip,mobileAction].forEach(el=>{
+    if(el){el.classList.remove('active');el.setAttribute('aria-expanded','false');}
+  });
+  if(restore){
+    const target=[_reasoningReturnFocus,chip,mobileAction,$('composerMobileConfigBtn')]
+      .find(el=>el&&el.isConnected&&el.getClientRects().length&&!el.disabled);
+    if(target) target.focus({preventScroll:true});
+  }
+  _reasoningReturnFocus=null;
 }
+
+// Capture before global shortcuts: Escape must only dismiss this picker.
+document.addEventListener('keydown',function(e){
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  if(window._isImeEnter && window._isImeEnter(e)) return;
+  const trigger=e.target.closest('#composerReasoningChip,#composerMobileReasoningAction');
+  if(trigger&&(e.key==='ArrowDown'||e.key==='ArrowUp')){
+    e.preventDefault();e.stopImmediatePropagation();
+    if(!dd.classList.contains('open')) toggleReasoningDropdown();
+    return;
+  }
+  if(!dd.classList.contains('open')||!dd.contains(e.target)) return;
+  const options=Array.from(dd.querySelectorAll('.reasoning-option')).filter(opt=>opt.style.display!=='none');
+  const index=options.indexOf(document.activeElement);
+  if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){
+    e.preventDefault();e.stopImmediatePropagation();
+    const next=e.key==='Home'?0:e.key==='End'?options.length-1:
+      Math.max(0,Math.min(options.length-1,index+(e.key==='ArrowDown'?1:-1)));
+    _focusReasoningOption(options[next]);
+  }else if(e.key==='Enter'||e.key===' '){
+    e.preventDefault();e.stopImmediatePropagation();
+    if(options[index]) options[index].click();
+  }else if(e.key==='Escape'||e.key==='Tab'){
+    if(e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();}
+    // Restore the trigger before the browser advances Tab outside the popup.
+    closeReasoningDropdown();
+  }
+},true);
+document.addEventListener('focusin',function(e){
+  const dd=$('composerReasoningDropdown');
+  if(dd&&dd.classList.contains('open')&&!dd.contains(e.target)
+      &&!e.target.closest('#composerReasoningChip,#composerMobileReasoningAction')) closeReasoningDropdown();
+});
 
 document.addEventListener('click',function(e){
   if(
@@ -8423,6 +8483,26 @@ function updateSendBtn(){
   }
   btn.title=_btnTitle;
   btn.setAttribute('aria-label',_btnTitle);
+  // Describe the resolved action, not the preference: explicit slash commands
+  // and unavailable steer/cancel capabilities can change the actual behavior.
+  const description=$('composerSendDescription');
+  if(description){
+    const copy={
+      steer:'Guides the current response without starting a new turn.',
+      queue:'Sends this message after the current work finishes.',
+      interrupt:'Stops the current response, then sends this message.',
+      stop:'Stops the current response without sending a message.'
+    };
+    const text=copy[action]?_tt('composer_description_'+action,copy[action]):'';
+    if(description.textContent!==text) description.textContent=text;
+    [$('msg'),btn].forEach(el=>{
+      if(!el) return;
+      const ids=(el.getAttribute('aria-describedby')||'').split(/\s+/).filter(id=>id&&id!=='composerSendDescription');
+      if(text) ids.push('composerSendDescription');
+      if(ids.length) el.setAttribute('aria-describedby',ids.join(' '));
+      else el.removeAttribute('aria-describedby');
+    });
+  }
   _setComposerPrimaryButtonIcon(btn,action);
   if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   // Single primary action button: while busy/no-draft it becomes the red Stop
@@ -8455,6 +8535,7 @@ async function handleComposerPrimaryAction(){
 function setBusy(v){
   S.busy=v;
   updateSendBtn();
+  if(typeof syncBackgroundActivity==='function') syncBackgroundActivity($('msgInner'));
   if(!v){
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
     setStatus('');
@@ -16716,7 +16797,9 @@ function _processWakeupCardHtml(info, rawText, extras){
   const exitKnown=/^-?\d+$/.test(exitStr);
   const exitOk=exitStr==='0';
   let chip;
-  if(isWatch){
+  if(info.type==='completion_batch'){
+    chip=`<span class="process-wakeup-chip neutral">${li('layers',11)}<span>${esc(t('background_activity_available'))}</span></span>`;
+  }else if(isWatch){
     chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
   }else{
     const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
@@ -16739,6 +16822,7 @@ function _processWakeupCardHtml(info, rawText, extras){
 
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
+  if(typeof syncFullTranscriptPreview==='function') syncFullTranscriptPreview();
   const preserveScroll=!!(options&&options.preserveScroll);
   const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when the reader has
@@ -16751,6 +16835,7 @@ function renderMessages(options){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
   }
+  const _backgroundOwners=typeof backgroundActivityOwners==='function'?backgroundActivityOwners(S.messages):new Map();
   const msgCount=S.messages.length;
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
@@ -16804,6 +16889,7 @@ function renderMessages(options){
       _rehydrateDeferredWorklogsFromCache(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      if(typeof syncBackgroundActivity==='function') syncBackgroundActivity(inner);
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
@@ -16875,6 +16961,7 @@ function renderMessages(options){
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
   const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
+  if(typeof prepareBackgroundActivityRender==='function') prepareBackgroundActivityRender(inner);
   _recycleStash.clear();
   if(_msgNodeRecycleEnabled){
     for(const child of Array.from(inner.children)){
@@ -17177,7 +17264,7 @@ function renderMessages(options){
         }
       }
     }
-    const isProcessWakeup=m&&m._source==='process_wakeup';
+    const isProcessWakeup=!!(m&&(m._source==='process_wakeup'||(typeof backgroundActivityOwners==='function'&&_backgroundOwners.has(rawIdx)&&m.role==='user')));
     const isUser=m.role==='user';
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
@@ -18353,6 +18440,7 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
+  if(typeof syncBackgroundActivity==='function') syncBackgroundActivity(inner);
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built

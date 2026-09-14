@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import json
 import logging
 import math
 import re
@@ -36,22 +37,42 @@ class AsyncDelegationDeliveryClaim:
     durable: bool
 
 
+def _is_interim_async_delegation(evt: Any) -> bool:
+    return (
+        isinstance(evt, dict)
+        and evt.get("type") == "async_delegation"
+        and bool(evt.get("task_failure_notice"))
+    )
+
+
 def completion_delivery_id(evt: Any) -> str:
     """Return the stable WebUI delivery/dedupe id for a completion event.
 
     Terminal background-process events use ``session_id`` for the process id.
-    Async ``delegate_task`` completions carry ``delegation_id`` instead, so both
-    WebUI delivery paths must key those events by ``delegation_id``.
+    Async ``delegate_task`` completions carry ``delegation_id`` instead. Early
+    per-task failure notices get a separate batch/child identity in both WebUI
+    delivery paths, and must never use that identity as a durable batch key.
     """
     if not isinstance(evt, dict):
         return ""
     if evt.get("type") == "async_delegation":
-        return str(
+        batch_id = str(
             evt.get("delegation_id")
             or evt.get("session_id")
             or evt.get("task_id")
             or ""
         ).strip()
+        if batch_id and _is_interim_async_delegation(evt):
+            # Core notices contain one results entry. Index 0 is a real child,
+            # not a missing value. Legacy notices may only carry a task id.
+            results = evt.get("results")
+            entry = results[0] if isinstance(results, list) and results else {}
+            entry = entry if isinstance(entry, dict) else {}
+            child = entry.get("task_index", evt.get("task_index"))
+            if child is None:
+                child = entry.get("task_id") or evt.get("task_id") or entry.get("session_id") or "unknown"
+            return "task_failure_notice:" + json.dumps([batch_id, child], separators=(",", ":"))
+        return batch_id
     return str(evt.get("session_id") or "").strip()
 
 
@@ -93,6 +114,9 @@ def wakeup_display_meta(text: Any) -> dict | None:
     rendered output verbatim (#6350 review finding 2).
     """
     body = str(text or "")
+    batch = re.match(r"\A\[BACKGROUND UPDATES\]\nEvents: (\d+); failed: (\d+)\n", body)
+    if batch:
+        return {"type": "completion_batch", "event_count": int(batch[1]), "failure_count": int(batch[2])}
     m = _WAKEUP_COMPLETION_RE.match(body)
     if m:
         exit_code: Any = m.group("exit_code")
@@ -189,6 +213,17 @@ def _release_bounded_local(delegation_id: str) -> None:
         _LEGACY_ASYNC_DELIVERY_IDS.pop(delegation_id, None)
 
 
+def _async_delivery_retry_delay(delay: Any) -> float | None:
+    """Reject delays that would overflow a wait or turn NaN into a hot loop."""
+    try:
+        value = float(delay)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(value) or value > threading.TIMEOUT_MAX:
+        return None
+    return max(0.0, value)
+
+
 def _arm_async_delegation_restore_sweep(completion_queue: Any, delay: float) -> bool:
     """Arm one process-wide durable restore sweep at the earliest deadline.
 
@@ -204,7 +239,9 @@ def _arm_async_delegation_restore_sweep(completion_queue: Any, delay: float) -> 
 
     if completion_queue is None:
         return False
-    retry_delay = max(0.0, float(delay))
+    retry_delay = _async_delivery_retry_delay(delay)
+    if retry_delay is None:
+        return False
     deadline = time.monotonic() + retry_delay
 
     with _ASYNC_DELIVERY_RETRY_LOCK:
@@ -263,6 +300,10 @@ def schedule_async_delegation_claim_retry(
     """Schedule a durable restore sweep after a claim or routing lease delay."""
     if not isinstance(evt, dict) or evt.get("type") != "async_delegation":
         return False
+    # An interim notice has no durable row of its own. Restoring its batch
+    # would silently substitute the final event for the notice being retried.
+    if _is_interim_async_delegation(evt):
+        return False
     delegation_id = str(evt.get("delegation_id") or "").strip()
     if not delegation_id or completion_queue is None:
         return False
@@ -283,7 +324,7 @@ def schedule_async_delegation_claim_retry(
         return False
 
     retry_delay = (
-        ASYNC_DELIVERY_CLAIM_RETRY_SECONDS if delay is None else max(0.0, float(delay))
+        ASYNC_DELIVERY_CLAIM_RETRY_SECONDS if delay is None else delay
     )
     return _arm_async_delegation_restore_sweep(completion_queue, retry_delay)
 
@@ -307,7 +348,9 @@ def requeue_async_delegation_event(
         return False
     if completion_queue is None:
         return False
-    retry_delay = max(0.0, float(delay))
+    retry_delay = _async_delivery_retry_delay(delay)
+    if retry_delay is None:
+        return False
     if retry_delay:
         if stop_event is not None:
             if stop_event.wait(retry_delay):
@@ -358,6 +401,10 @@ def claim_async_delegation_delivery(
     delegation_id = completion_delivery_id(evt)
     if not delegation_id or not _claim_bounded_local(delegation_id):
         return None
+    # Do not rely on a core version recognizing this flag: older durable APIs
+    # would claim/ACK the batch row, and legacy markers would consume it too.
+    if _is_interim_async_delegation(evt):
+        return AsyncDelegationDeliveryClaim(delegation_id, "", False)
 
     try:
         from tools.async_delegation import (
@@ -430,6 +477,8 @@ def complete_async_delegation_delivery(
     claim: AsyncDelegationDeliveryClaim,
 ) -> None:
     """Complete a claim after WebUI has accepted the event for delivery."""
+    if _is_interim_async_delegation(evt):
+        return  # local notice dedupe only; never mark the final batch consumed
     if claim.durable:
         from tools.async_delegation import complete_event_delivery
 
@@ -457,7 +506,7 @@ def release_async_delegation_delivery(
 ) -> None:
     """Release a failed claim so a later WebUI consumer can retry it."""
     try:
-        if claim.durable:
+        if claim.durable and not _is_interim_async_delegation(evt):
             from tools.async_delegation import release_event_delivery
 
             release_event_delivery(evt, claim.claim_id)
@@ -467,6 +516,59 @@ def release_async_delegation_delivery(
             claim.delegation_id,
             exc_info=True,
         )
+    finally:
+        _release_bounded_local(claim.delegation_id)
+
+
+def defer_async_delegation_delivery(
+    evt: Any,
+    claim: AsyncDelegationDeliveryClaim,
+) -> bool:
+    """Refund a claim rejected at admission, not a failed delivery attempt.
+
+    Older durable cores have the ledger update primitive but not the public
+    defer helper. Use the same token-scoped atomic refund, never failed-release
+    or an unscoped marker. Unknown contracts fail closed with the lease intact;
+    callers must not spin a retry loop when no safe refund was possible.
+    """
+    try:
+        if claim.durable and claim.claim_id and not _is_interim_async_delegation(evt):
+            from tools import async_delegation as core
+
+            delegation_id = str(evt.get("delegation_id") or "")
+            defer = getattr(core, "defer_completion_delivery", None)
+            update = getattr(core, "_update_delivery", None)
+            if callable(defer):
+                refunded = defer(delegation_id, claim.claim_id)
+            elif callable(update):
+                refunded = update(
+                    """UPDATE async_delegations SET delivery_claim=NULL,
+                              delivery_claimed_at=NULL,
+                              delivery_attempts=MAX(0, delivery_attempts-1), updated_at=?
+                       WHERE delegation_id=? AND delivery_state='pending'
+                         AND delivery_claim=?""",
+                    (time.time(), delegation_id, claim.claim_id),
+                )
+            else:
+                logger.warning(
+                    "Core cannot refund unadmitted async delivery %s; preserving lease "
+                    "without scheduling another attempt (upgrade core)", delegation_id,
+                )
+                return False
+            if refunded:
+                return True
+            # Current cores also issue tokens for pre-ledger legacy events.
+            # Only a positively absent row permits a local retry after no refund;
+            # a stale token must not disturb or race another durable owner.
+            get_record = getattr(core, "get_durable_delegation", None)
+            return callable(get_record) and get_record(delegation_id) is None
+        return True
+    except Exception:
+        logger.warning(
+            "Failed to defer async delivery %s; preserving durable lease",
+            claim.delegation_id, exc_info=True,
+        )
+        return False
     finally:
         _release_bounded_local(claim.delegation_id)
 

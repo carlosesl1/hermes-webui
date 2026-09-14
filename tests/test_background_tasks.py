@@ -24,6 +24,7 @@ import os
 import pathlib
 import sys
 import time
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -39,7 +40,11 @@ class TestGetResultsKeepsRunningTasks(unittest.TestCase):
 
     def setUp(self):
         import api.background as bg
-        bg._BACKGROUND_TASKS.clear()
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        state_patch = patch.object(bg, "STATE_DIR", pathlib.Path(state.name))
+        state_patch.start()
+        self.addCleanup(state_patch.stop)
         self.bg = bg
 
     def test_running_tasks_survive_get_results_call(self):
@@ -66,8 +71,8 @@ class TestGetResultsKeepsRunningTasks(unittest.TestCase):
         self.assertEqual(remaining[0]["status"], "running")
         self.assertEqual(remaining[0]["task_id"], "task-a")
 
-    def test_done_tasks_are_returned_and_removed(self):
-        """Done tasks are returned and popped; running tasks stay."""
+    def test_done_tasks_are_returned_and_retained(self):
+        """Terminal reads retain every task for reload and other consumers."""
         parent = "parent-session-2"
         self.bg.track_background(parent, "bg-done", "s-d", "task-done", "p1")
         self.bg.track_background(parent, "bg-run", "s-r", "task-run", "p2")
@@ -78,11 +83,11 @@ class TestGetResultsKeepsRunningTasks(unittest.TestCase):
         self.assertEqual(results[0]["task_id"], "task-done")
         self.assertEqual(results[0]["answer"], "42")
 
-        # Done one is gone; running one is still tracked
         remaining = self.bg.get_background_tasks(parent)
-        self.assertEqual(len(remaining), 1)
-        self.assertEqual(remaining[0]["task_id"], "task-run")
-        self.assertEqual(remaining[0]["status"], "running")
+        self.assertEqual(len(remaining), 2)
+        self.assertEqual(remaining[1]["task_id"], "task-run")
+        self.assertEqual(remaining[1]["status"], "running")
+        self.assertEqual(self.bg.get_results(parent), results)
 
     def test_complete_after_poll_still_reaches_tracker(self):
         """Regression for the original bug: poll → complete → poll must surface
@@ -104,13 +109,13 @@ class TestGetResultsKeepsRunningTasks(unittest.TestCase):
         self.assertEqual(second[0]["task_id"], "task-x")
         self.assertEqual(second[0]["answer"], "answer!")
 
-    def test_empty_parent_is_cleaned_up(self):
-        """When all tasks are done and returned, the parent key is removed from the dict."""
+    def test_completed_parent_is_retained(self):
+        """Reading the last result does not delete the parent's durable history."""
         parent = "parent-session-4"
         self.bg.track_background(parent, "bg-1", "s-1", "task-1", "p")
         self.bg.complete_background(parent, "task-1", "ok")
         self.bg.get_results(parent)
-        self.assertNotIn(parent, self.bg._BACKGROUND_TASKS)
+        self.assertEqual(self.bg.get_background_tasks(parent)[0]["answer"], "ok")
 
 
 class TestBackgroundCompletionHookWiring(unittest.TestCase):

@@ -85,7 +85,7 @@ class TestTooltipText(unittest.TestCase):
         """syncWorkspacePanelUI() sets tooltip to 'Close' (not 'Hide workspace panel')."""
         idx = BOOT_JS.find("function syncWorkspacePanelUI()")
         self.assertGreater(idx, 0, "syncWorkspacePanelUI() not found")
-        body = BOOT_JS[idx:idx + 2000]
+        body = BOOT_JS[idx:BOOT_JS.index("\nfunction toggleMobileSidebar", idx)]
         # The tooltip line should contain 'Close' and NOT 'Hide workspace panel'
         self.assertIn(
             "'Close'",

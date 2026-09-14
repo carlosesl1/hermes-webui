@@ -53,6 +53,7 @@ from api.process_event_utils import (
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
+    defer_async_delegation_delivery,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
@@ -1059,23 +1060,31 @@ def _start_async_delegation_wakeup_turn(
                 )
                 return
 
+            if status == 409 and (resp or {}).get("error") in {
+                "process_wakeup_paused", "session already has an active stream", "busy",
+            }:
+                # The idle check races admission. Credential pauses and a new
+                # foreground owner did not attempt delivery; refund the claim.
+                if defer_async_delegation_delivery(evt, claim):
+                    logger.info(
+                        "async delegation admission deferred for session %s: %s",
+                        session_id, (resp or {}).get("error"),
+                    )
+                    _retry_unclaimed_async_delegation_event(
+                        process_registry, evt, keep_legacy_retrying=True
+                    )
+                return
             release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
                 process_registry, evt, keep_legacy_retrying=True
             )
-            if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
-                logger.info(
-                    "async delegation wakeup paused for session %s; delivery remains retryable",
-                    session_id,
-                )
-            else:
-                logger.debug(
-                    "async delegation wakeup not accepted for session %s: "
-                    "status=%s err=%r; durable retry scheduled",
-                    session_id,
-                    status,
-                    (resp or {}).get("error"),
-                )
+            logger.debug(
+                "async delegation wakeup not accepted for session %s: "
+                "status=%s err=%r; durable retry scheduled",
+                session_id,
+                status,
+                (resp or {}).get("error"),
+            )
         except Exception:
             release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
@@ -1518,32 +1527,21 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 "PENDING discard failed for session %s", session_id, exc_info=True
             )
         started = 0
-        # Greptile P1 fix: do NOT fire one daemon-threaded wakeup per entry in
-        # a tight loop. Each ``_start_server_side_wakeup_turn`` spawns a daemon
-        # thread that races for the per-session agent lock; only ONE can win,
-        # the rest 409. Since we already claimed + popped every entry (line
-        # ~938) and discarded the PENDING marker, the losers' prompts would be
-        # permanently lost. Instead: start exactly the FIRST prompt, and
-        # re-defer the remaining entries so each subsequent turn-teardown
-        # (or next-turn drain) delivers the next one — one wakeup per turn,
-        # which matches the single-prompt-per-turn design and the
-        # BG_TASK_COMPLETE_EVENTS_SEEN dedup (no double-fire).
-        leftover = [e for e in entries if str((e or {}).get("wakeup_prompt") or "").strip()]
-        if leftover:
-            first = leftover[0]
-            # Re-defer entries 2..N BEFORE starting the first turn, so they are
-            # already persisted if the first wakeup's own teardown re-runs this
-            # hook and tries to claim them.
-            for entry in leftover[1:]:
-                record_deferred_wakeup(
-                    session_id,
-                    str((entry or {}).get("process_id") or ""),
-                    str((entry or {}).get("wakeup_prompt") or "").strip(),
-                )
-            _start_server_side_wakeup_turn(
+        # Deliver a bounded group in one continuation rather than an N-turn
+        # acknowledgement cascade. Keep whole overflow events queued BEFORE
+        # dispatch; the existing 409 path requeues the entire stable batch.
+        from api.background_batch import coalesce_wakeup_entries
+
+        prompt, process_id, remaining = coalesce_wakeup_entries(entries)
+        for entry in remaining:
+            record_deferred_wakeup(
                 session_id,
-                str((first or {}).get("wakeup_prompt") or "").strip(),
-                process_id=str((first or {}).get("process_id") or ""),
+                str(entry.get("process_id") or ""),
+                str(entry.get("wakeup_prompt") or ""),
+            )
+        if prompt:
+            _start_server_side_wakeup_turn(
+                session_id, prompt, process_id=process_id,
             )
             started = 1
         if started:
@@ -1622,8 +1620,12 @@ def _start_server_side_wakeup_turn(
             )
             status = int((resp or {}).get("_status", 200) or 200)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                # Admission did not consume these results. Keep the batch for
+                # a later human turn/recovery hook, without a retry timer loop.
+                if wakeup_prompt:
+                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.info(
-                    "server-side wakeup suppressed for session %s: provider credential state is paused",
+                    "server-side wakeup deferred for session %s: provider credential state is paused",
                     session_id,
                 )
             elif status == 409:
@@ -1642,6 +1644,8 @@ def _start_server_side_wakeup_turn(
                     session_id,
                 )
             elif status >= 400:
+                if status >= 500 and wakeup_prompt:
+                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.warning(
                     "server-side wakeup failed for session %s: status=%s err=%r",
                     session_id,
@@ -1655,6 +1659,8 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("stream_id"),
                 )
         except Exception:
+            if wakeup_prompt:
+                record_deferred_wakeup(session_id, process_id, wakeup_prompt)
             logger.warning(
                 "server-side wakeup turn raised for session %s",
                 session_id,

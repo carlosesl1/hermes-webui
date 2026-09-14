@@ -8777,66 +8777,46 @@ def _tool_result_matches_call_ids(message, call_ids) -> bool:
 
 
 def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
-    """Return a paginated message window plus its offset in ``messages``.
+    """Select by index; hidden rows do not consume the visible-row budget.
 
-    ``msg_limit`` is a visible transcript limit, not a raw storage-row cap.
-    Tool result rows are hidden or folded into assistant tool cards, so they
-    should not consume the user's "load N messages" budget. Return the smallest
-    suffix containing the last ``msg_limit`` renderable user/assistant rows, plus
-    any intervening tool rows needed for card snippets.
-
-    ``expand_renderable`` is accepted for compatibility with older frontend
-    callers. Visible-row expansion is now the default for every limited window.
+    Only collect call IDs from the selected window, and only when trailing
+    results need matching. Never copy or walk the entire prefix for a tail page.
+    Orphan-only tails keep the existing fallback; intervening rows and absolute
+    offsets are untouched.
     """
     _ = expand_renderable
-    messages = list(messages or [])
-    if msg_before is not None:
-        before_idx = max(0, min(int(msg_before), len(messages)))
-    else:
-        before_idx = len(messages)
-    source = messages[:before_idx]
-    if not source:
+    source = messages if isinstance(messages, (list, tuple)) else list(messages or [])
+    before_idx = len(source) if msg_before is None else max(0, min(int(msg_before), len(source)))
+    if not before_idx:
         return [], 0
     if not msg_limit:
-        return source, 0
+        return list(source[:before_idx]), 0
     limit = max(1, int(msg_limit))
-    end_idx = len(source)
     last_renderable_idx = None
-    for idx in range(end_idx - 1, -1, -1):
+    for idx in range(before_idx - 1, -1, -1):
         if _message_counts_as_renderable_for_window(source[idx]):
             last_renderable_idx = idx
             break
     if last_renderable_idx is None:
-        start_idx = max(0, end_idx - limit)
-        return source[start_idx:end_idx], start_idx
-    # Keep the last renderable row, plus any immediately-following tool-result
-    # rows whose tool_call_id matches a tool-call on a renderable row already in
-    # the window. The renderer rebuilds tool cards (CLI-origin / empty
-    # S.toolCalls path) from role:"tool" rows indexed by tool_call_id
-    # (static/ui.js resultsByTid), so dropping the result row that follows the
-    # newest assistant tool-call would leave that card without its snippet.
-    # Orphan trailing tool-only rows (no matching call in the window) are still
-    # skipped, preserving the visible-row budget. (#4070 ship-review)
-    end_idx = last_renderable_idx + 1
-    window_tool_call_ids = _tool_call_ids_in_messages(source[: last_renderable_idx + 1])
-    while end_idx < len(source) and not _message_counts_as_renderable_for_window(
-        source[end_idx]
-    ):
-        if _tool_result_matches_call_ids(source[end_idx], window_tool_call_ids):
-            end_idx += 1
-        else:
-            break
+        start_idx = max(0, before_idx - limit)
+        return source[start_idx:before_idx], start_idx
     start_idx = 0
     renderable_count = 0
     for idx in range(last_renderable_idx, -1, -1):
-        if not _message_counts_as_renderable_for_window(source[idx]):
-            continue
-        renderable_count += 1
-        if renderable_count >= limit:
-            start_idx = idx
-            break
-    window = source[start_idx:end_idx]
-    return window, start_idx
+        if _message_counts_as_renderable_for_window(source[idx]):
+            renderable_count += 1
+            if renderable_count >= limit:
+                start_idx = idx
+                break
+    end_idx = last_renderable_idx + 1
+    if end_idx < before_idx:
+        call_ids = _tool_call_ids_in_messages(
+            source[idx] for idx in range(start_idx, end_idx)
+        )
+        while end_idx < before_idx and _tool_result_matches_call_ids(source[end_idx], call_ids):
+            end_idx += 1
+    return source[start_idx:end_idx], start_idx
+
 
 
 _LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
@@ -8946,8 +8926,9 @@ def _tool_message_for_limited_payload(message):
 
 
 def _messages_for_limited_payload(messages) -> list:
-    """Bound hidden tool-result payloads before sending a msg_limit response."""
-    return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
+    """Bound render text, never the canonical transcript or model context."""
+    from api.render_payload import bounded_render_messages
+    return bounded_render_messages(messages)
 
 
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
@@ -13085,8 +13066,11 @@ def _handle_session_get(handler, parsed) -> bool:
                 msg_before=msg_before,
                 expand_renderable=expand_renderable,
             )
-            if msg_limit is not None:
-                _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
+            if msg_before is not None and query.get("msg_boundary", [""])[0] == "1":
+                # Cursor pages must tile the raw coordinate space, including
+                # hidden/orphan rows at the seam. Otherwise prepending silently
+                # shifts every newer message's absolute edit/tool index.
+                _truncated_msgs = _all_msgs[_messages_offset:max(0, min(msg_before, len(_all_msgs)))]
             _truncated_msgs = _hydrate_anchor_activity_scenes(
                 _truncated_msgs,
                 getattr(s, "anchor_activity_scenes", None),
@@ -13302,6 +13286,30 @@ def _handle_session_get(handler, parsed) -> bool:
             )
             if revision:
                 raw["regeneration_revision"] = revision
+        if load_messages and msg_limit is not None:
+            # Apply AFTER scene hydration and legacy tool-card assembly. Clip
+            # before redaction/serialization so those do not scan giant text.
+            from api.render_payload import bounded_render_messages, PAGE_CHARS
+            budget = [PAGE_CHARS]
+            raw["messages"] = bounded_render_messages(raw["messages"], page_budget=budget)
+            raw["tool_calls"] = bounded_render_messages(raw["tool_calls"], page_budget=budget)
+            from urllib.parse import urlencode
+            full_url = "/api/session?" + urlencode({
+                "session_id": sid, "messages": 1, "resolve_model": 0,
+            })
+            raw["_full_content_url"] = full_url
+            if msg_before is not None and query.get("msg_boundary", [""])[0] == "1":
+                boundary = _all_msgs[msg_before:msg_before + 1] if msg_before >= 0 else []
+                boundary = _hydrate_anchor_activity_scenes(
+                    boundary, getattr(s, "anchor_activity_scenes", None),
+                    message_offset=msg_before, tool_calls=getattr(s, "tool_calls", None),
+                )
+                raw["_messages_boundary"] = (
+                    _messages_for_limited_payload(boundary)[0] if boundary else None
+                )
+            for row in raw["messages"] + raw["tool_calls"]:
+                if isinstance(row, dict) and row.get("_content_truncated"):
+                    row["_full_content_url"] = full_url
         redact = redact_session_data(raw)
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
@@ -14051,8 +14059,10 @@ def handle_get(handler, parsed) -> bool:
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
-        from api.background import get_results
-        return j(handler, {"results": get_results(sid)})
+        from api.background import get_background_tasks
+        tasks = get_background_tasks(sid)
+        return j(handler, {"parent_session_id": sid, "tasks": tasks,
+                           "results": [task for task in tasks if task["status"] != "running"]})
 
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
@@ -22405,68 +22415,79 @@ def _handle_background(handler, body):
     bg.title = f"bg: {prompt[:60]}"
     bg.save()
     stream_id = uuid.uuid4().hex
-    bg.active_stream_id = stream_id
-    register_session_writeback_owner(bg.session_id, stream_id)
-    bg.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, bg.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    task_id = uuid.uuid4().hex[:8]
+    task_id = uuid.uuid4().hex
     from api.background import track_background, complete_background
-    parent_sid = body["session_id"]
+    parent_sid = s.session_id
     bg_sid = bg.session_id
-    track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
+    # Capture immutable execution inputs, never mutate/save the parent from a worker.
+    bg_model, bg_workspace = bg.model, bg.workspace
+    try:
+        track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
+    except Exception:
+        logger.exception("Could not persist background task before launch")
+        return bad(handler, "Could not save background task; task was not started", 500)
 
     def _run_bg_and_notify():
-        """Run the background agent, then mark the tracked task `done` with the
-        last assistant reply so `/api/background/status` can surface it.  Without
-        this, `complete_background()` is never called and the result is lost —
-        `get_results()` would see a forever-`running` task and return nothing.
-        """
+        """Settle the separate task ledger before deleting child output."""
+        answer, status, error = "", "no_response", None
         try:
             _run_agent_streaming(
-                bg_sid,
-                prompt,
-                s.model,
-                s.workspace,
-                stream_id,
-                None,
+                bg_sid, prompt, bg_model, bg_workspace, stream_id, None,
                 model_provider=model_provider,
             )
-            # Reload the bg session from disk and extract the final assistant reply.
-            try:
-                from api.models import Session as _Session
-                reloaded = _Session.load(bg_sid)
-                _answer = ""
-                for _m in reversed((reloaded.messages if reloaded else None) or []):
-                    if not isinstance(_m, dict) or _m.get("role") != "assistant":
-                        continue
-                    if _m.get("_error"):
-                        continue
-                    _content = str(_m.get("content") or "").strip()
-                    if _content:
-                        _answer = _content
-                        break
-                complete_background(parent_sid, task_id, _answer or "(no answer produced)")
-            except Exception:
-                complete_background(parent_sid, task_id, "(background task failed)")
-            # Best-effort cleanup of the hidden bg session file so it doesn't
-            # clutter the sidebar or SESSION_DIR. The index is pruned on the
-            # next rebuild via _index_entry_exists().
+            from api.models import Session as _Session
+            reloaded = _Session.load(bg_sid)
+            for message in reversed((reloaded.messages if reloaded else None) or []):
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                content = str(message.get("content") or "").strip()
+                if message.get("_error"):
+                    status = "cancelled" if message.get("provider_details_label") == "Cancellation details" else "error"
+                    error = content or "Background task failed."
+                    break
+                # Tool-call prose is progress, not a final answer.
+                if content and not message.get("tool_calls"):
+                    answer, status = content, "done"
+                    break
+        except Exception:
+            logger.exception("Background task failed: %s", task_id)
+            status, error = "error", "Background task failed."
+        try:
+            saved = complete_background(parent_sid, task_id, answer, status=status, error=error)
+        except Exception:
+            logger.exception("Could not save background result; retaining child %s", bg_sid)
+            return
+        if saved:
             try:
                 (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
-            except Exception:
-                pass
-        except Exception:
-            try:
-                complete_background(parent_sid, task_id, "(background task failed)")
-            except Exception:
-                pass
+            except OSError:
+                logger.warning("Could not clean up background child %s", bg_sid)
 
-    thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
-    thr.start()
-    return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
+    try:
+        bg.active_stream_id = stream_id
+        register_session_writeback_owner(bg_sid, stream_id)
+        bg.save()
+        stream = create_stream_channel()
+        register_stream_owner(stream_id, bg_sid)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
+        thr.start()
+    except Exception:
+        logger.exception("Background worker could not start: %s", task_id)
+        try:
+            complete_background(parent_sid, task_id, "", status="error", error="Background worker could not start.")
+        except Exception:
+            logger.exception("Could not persist background launch failure; retaining child %s", bg_sid)
+        finally:
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+            unregister_stream_owner(stream_id)
+            from api.config import clear_session_writeback_owner_if_owned
+            clear_session_writeback_owner_if_owned(bg_sid, stream_id)
+        return bad(handler, "Background worker could not start", 500)
+    return j(handler, {"task_id": task_id, "stream_id": stream_id,
+                       "session_id": bg.session_id, "parent_session_id": parent_sid})
 
 
 def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None, source: str = "webui") -> None:

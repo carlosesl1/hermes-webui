@@ -482,18 +482,13 @@ def test_teardown_409_requeues_wakeup_so_it_is_not_lost(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# Test 7 — credential exhaustion pause: a paused wakeup is also a 409, but it
-# must be treated as intentionally suppressed rather than an active-turn race.
+# Test 7 — credential pause retains the claimed payload, without a retry loop.
+# Admission rejection is not successful delivery; a later turn can recover it.
 # --------------------------------------------------------------------------
 
 
-def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
-    """A credential-exhaustion pause returns 409, but must not re-defer.
-
-    Ordinary 409s mean "another turn won the lock" and need redelivery. A
-    ``process_wakeup_paused`` 409 means the wakeup was intentionally suppressed,
-    so re-queueing would recreate the same provider-unavailable loop.
-    """
+def test_paused_process_wakeup_409_retains_payload_without_retry_loop(monkeypatch):
+    """Retain results for a later turn; never launch an immediate retry timer."""
     from api import background_process as bp, config as cfg
     import api.routes as routes
 
@@ -505,10 +500,9 @@ def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
         holder["calls"].append(
             {"session_id": session_id, "message": message, "source": source}
         )
-        holder["event"].set()
         return {"_status": 409, "error": "process_wakeup_paused"}
 
-    def _unexpected_requeue(session_id, process_id, wakeup_prompt):
+    def _retained_requeue(session_id, process_id, wakeup_prompt):
         holder["requeued"].append(
             {
                 "session_id": session_id,
@@ -516,6 +510,7 @@ def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
                 "wakeup_prompt": wakeup_prompt,
             }
         )
+        holder["event"].set()
 
     try:
         bp.record_deferred_wakeup(
@@ -524,16 +519,15 @@ def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
             "[IMPORTANT: Background process completed while credentials were unavailable.]",
         )
         monkeypatch.setattr(routes, "start_session_turn", _paused_start_session_turn)
-        monkeypatch.setattr(bp, "record_deferred_wakeup", _unexpected_requeue)
+        monkeypatch.setattr(bp, "record_deferred_wakeup", _retained_requeue)
 
         assert bp.drain_deferred_wakeups_for_session(sid) == 1
         assert holder["event"].wait(timeout=1.0)
 
-        import time as _t
-
-        _t.sleep(0.1)
         assert len(holder["calls"]) == 1
-        assert holder["requeued"] == []
+        assert len(holder["requeued"]) == 1
+        assert holder["requeued"][0]["process_id"] == "proc-paused-1"
+        assert holder["requeued"][0]["wakeup_prompt"] == holder["calls"][0]["message"]
         with cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
             assert sid not in cfg.DEFERRED_PROCESS_WAKEUPS
     finally:
@@ -548,12 +542,11 @@ def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
 
 
 def test_multiple_deferred_wakeups_each_survive_across_teardowns(monkeypatch):
-    """N>=2 bg tasks complete during one active turn → all deferred. A single
-    teardown drain must NOT fire N racing daemon threads (only one wins the
-    agent lock; the losers 409 and, since the entries were already popped,
-    their prompts would be lost forever). The fix starts exactly one wakeup
-    and re-defers the remainder, so each subsequent teardown delivers the
-    next — every prompt is eventually delivered exactly once.
+    """N completions are delivered once in a single bounded continuation.
+
+    The old serial replay contract created one response per completion. The
+    coalesced contract preserves every prompt but starts just one owned turn.
+    Oversized batches retain FIFO overflow (covered by the batching tests).
     """
     from api import background_process as bp, config as cfg
 
@@ -575,31 +568,17 @@ def test_multiple_deferred_wakeups_each_survive_across_teardowns(monkeypatch):
             bp._process_one(_completion_evt(pid, sid))
         assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 3
 
-        # Turn teardown → idle. Drain reports exactly ONE wakeup started, and
-        # the other two are re-deferred (not popped-and-lost).
+        # Turn teardown → idle. One continuation owns all three results.
         cfg.unregister_active_run(stream_id)
         assert bp._session_has_active_turn(sid) is False
         assert bp.drain_deferred_wakeups_for_session(sid) == 1
         assert _wait_for_wakeup(holder)
         assert len(holder["calls"]) == 1
-        assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 2
-
-        # Second teardown delivers the next, third delivers the last.
-        holder["event"].clear()
-        assert bp.drain_deferred_wakeups_for_session(sid) == 1
-        assert _wait_for_wakeup(holder)
-        assert len(holder["calls"]) == 2
-        assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 1
-
-        holder["event"].clear()
-        assert bp.drain_deferred_wakeups_for_session(sid) == 1
-        assert _wait_for_wakeup(holder)
-        assert len(holder["calls"]) == 3
         assert sid not in cfg.DEFERRED_PROCESS_WAKEUPS
-
-        # All three distinct prompts delivered exactly once, no duplicates.
-        delivered = {c["message"] for c in holder["calls"]}
-        assert len(delivered) == 3
+        delivered = holder["calls"][0]["message"]
+        for pid in ("proc-A", "proc-B", "proc-C"):
+            prompt = bp.format_wakeup_prompt(_completion_evt(pid, sid))
+            assert delivered.count(prompt) == 1
         # Nothing left → a final drain is a no-op (no wakeup loop).
         assert bp.drain_deferred_wakeups_for_session(sid) == 0
     finally:

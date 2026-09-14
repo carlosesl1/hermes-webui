@@ -8,7 +8,12 @@ api.run_journal.SSE_RELAY_CLOSE_EVENTS.
 """
 from __future__ import annotations
 
+import ast
 from pathlib import Path
+import queue
+import threading
+
+import pytest
 
 from api.run_journal import SSE_RELAY_CLOSE_EVENTS, TERMINAL_SSE_EVENTS
 
@@ -34,10 +39,35 @@ def test_routes_relay_loops_import_sse_relay_close_events():
     assert '_is_terminal = event in ("stream_end", "error", "cancel")' not in src
 
 
-def test_cancel_drop_list_allows_apperror_not_phantom_error():
-    src = Path("api/streaming.py").read_text(encoding="utf-8")
-    assert "event not in ('cancel', 'apperror')" in src
-    assert "event not in ('cancel', 'error')" not in src
+@pytest.mark.parametrize("cancel_requested", [False, True])
+def test_worker_apperror_publishes_only_before_cancel(tmp_path, monkeypatch, cancel_requested):
+    """An interrupt-induced provider error must not steal the cancel terminal."""
+    from api import run_journal, streaming
+
+    tree = ast.parse(Path(streaming.__file__).read_text(encoding="utf-8"))
+    worker = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                  and n.name == "_run_agent_streaming")
+    put = next(n for n in worker.body if isinstance(n, ast.FunctionDef) and n.name == "put")
+    monkeypatch.setattr(streaming, "STREAM_LAST_EVENT_ID", {})
+    writer = run_journal.RunJournalWriter("sid", "run", session_dir=tmp_path)
+    channel, flag = queue.Queue(), threading.Event()
+    if cancel_requested:
+        flag.set()
+    ns = dict(vars(streaming), run_journal=writer, q=channel, stream_id="run",
+              cancel_event=flag, _success_writeback_committed=False)
+    exec(compile(ast.Module(body=[put], type_ignores=[]), streaming.__file__, "exec"), ns)
+    ns["put"]("apperror", {"message": "provider failed"})
+    if cancel_requested:
+        assert channel.empty()
+        assert run_journal.read_run_events("sid", "run", session_dir=tmp_path)["events"] == []
+        ns["put"]("cancel", {"message": "Cancelled by user"})
+        ns["put"]("apperror", {"message": "late provider failure"})
+    expected = "cancel" if cancel_requested else "apperror"
+    rows = run_journal.read_run_events("sid", "run", session_dir=tmp_path)["events"]
+    assert [row["event"] for row in rows] == [expected]
+    assert channel.get_nowait()[0] == expected
+    assert channel.empty()
+    assert expected in SSE_RELAY_CLOSE_EVENTS
 
 
 def test_apperror_terminates_relay_close_predicate():

@@ -9298,47 +9298,111 @@ function attachBtwStream(parentSid, streamId, question){
 
 // ── /background task tracking ────────────────────────────────────────────────
 
-let _bgPollTimers={};
-let _bgActiveTasks=new Set();
+// One owner for the visible parent, independent of task count. The durable
+// ledger (not S.messages, DOM or localStorage) owns task output across tabs.
+let _bgPollOwner=null;
 
-function showBackgroundBadge(taskId){
-  _bgActiveTasks.add(taskId);
-  const badge=$('bgBadge');
-  if(badge){
-    badge.textContent=String(_bgActiveTasks.size);
-    badge.style.display=_bgActiveTasks.size?'':'none';
-  }
+function _backgroundOwnerVisible(owner){
+  return _bgPollOwner===owner&&S.session&&S.session.session_id===owner.sid;
 }
-function hideBackgroundBadge(taskId){
-  _bgActiveTasks.delete(taskId);
+function _updateBackgroundBadge(tasks){
   const badge=$('bgBadge');
-  if(badge){
-    badge.textContent=String(_bgActiveTasks.size);
-    badge.style.display=_bgActiveTasks.size?'':'none';
+  const count=tasks.filter(task=>task.status==='running').length;
+  if(badge){badge.textContent=String(count);badge.style.display=count?'':'none';}
+}
+// Compatibility with cmdBackground: only the parent-scoped snapshot sets counts.
+function showBackgroundBadge(){
+  if(_bgPollOwner&&_backgroundOwnerVisible(_bgPollOwner)) _updateBackgroundBadge(_bgPollOwner.tasks);
+}
+function stopBackgroundPolling(){
+  const owner=_bgPollOwner;
+  _bgPollOwner=null;
+  if(owner){clearTimeout(owner.timer);owner.controller?.abort();}
+  const panel=$('backgroundTasks');
+  if(panel) panel.remove();
+  _updateBackgroundBadge([]);
+}
+function _renderBackgroundTasks(owner){
+  if(!_backgroundOwnerVisible(owner)) return;
+  _updateBackgroundBadge(owner.tasks);
+  let panel=$('backgroundTasks');
+  if(!owner.tasks.length){if(panel) panel.remove();return;}
+  const inner=$('msgInner');
+  if(!inner||!inner.parentNode) return;
+  if(!panel){
+    panel=document.createElement('section');
+    panel.id='backgroundTasks';
+    panel.className='messages-inner';
+    panel.dataset.sessionId=owner.sid;
+    panel.setAttribute('aria-label',t('bg_tasks'));
+    panel.style.paddingTop='0';
+    inner.after(panel);
+  }
+  // Keyed rows preserve native disclosure/focus during polling.
+  for(const task of owner.tasks){
+    let row=Array.from(panel.children).find(el=>el.dataset.taskId===task.task_id);
+    if(!row){
+      row=document.createElement('details');
+      row.className='background-task';
+      row.dataset.taskId=task.task_id;
+      const summary=document.createElement('summary');
+      summary.style.cssText='cursor:pointer;padding:8px 0;color:var(--text-muted);font-size:12px;overflow-wrap:anywhere';
+      const body=document.createElement('div');
+      body.className='msg-body';
+      body.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;min-width:0';
+      row.append(summary,body);
+      panel.appendChild(row);
+    }
+    const statuses=['running','done','error','no_response','interrupted','cancelled'];
+    const name=String(task.prompt||t('bg_task'));
+    const summary=row.firstElementChild;
+    const title=t('bg_task')+' · '+t('bg_status_'+(statuses.includes(task.status)?task.status:'unknown'))+' — '+name.slice(0,80);
+    if(summary.textContent!==title) summary.textContent=title;
+    summary.title=name;
+    const body=row.lastElementChild;
+    const output=name+'\n\n'+(task.answer||task.error||(task.status==='running'?t('bg_task_running'):t('bg_no_answer')));
+    if(body.textContent!==output) body.textContent=output;
   }
 }
 function startBackgroundPolling(parentSid, taskId, prompt){
-  if(_bgPollTimers[taskId]) return;
-  async function _poll(){
-    try{
-      const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
-      if(r&&r.results){
-        for(const res of r.results){
-          if(res.task_id===taskId){
-            hideBackgroundBadge(taskId);
-            delete _bgPollTimers[taskId];
-            const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
-            S.messages.push(msg);
-            renderMessages({preserveScroll:true});
-            showToast(t('bg_complete'));
-            return;
-          }
-        }
-      }
-    }catch(_){}
-    _bgPollTimers[taskId]=setTimeout(_poll,3000);
+  // A POST/poll that finishes after navigation must never adopt the new pane.
+  if(!S.session||S.session.session_id!==parentSid) return;
+  if(_bgPollOwner&&_bgPollOwner.sid===parentSid){
+    if(taskId&&!_bgPollOwner.pending){clearTimeout(_bgPollOwner.timer);_bgPollOwner.poll();}
+    return;
   }
-  _poll();
+  stopBackgroundPolling();
+  const owner={sid:parentSid,tasks:[],timer:null,pending:false,controller:null};
+  _bgPollOwner=owner;
+  owner.poll=async()=>{
+    if(!_backgroundOwnerVisible(owner)){if(_bgPollOwner===owner) stopBackgroundPolling();return;}
+    owner.pending=true;
+    owner.controller=new AbortController();
+    try{
+      const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid),{signal:owner.controller.signal,timeoutToast:false,retries:0});
+      if(!_backgroundOwnerVisible(owner)) return;
+      if(r?.parent_session_id===parentSid&&Array.isArray(r.tasks)){
+        owner.tasks=r.tasks.filter(task=>task.parent_session_id===parentSid);
+        _renderBackgroundTasks(owner);
+      }
+    }catch(error){
+      // Retain the last durable snapshot on transport errors; retry without
+      // claiming task completion or injecting a synthetic assistant message.
+    }finally{
+      owner.pending=false;
+      if(_backgroundOwnerVisible(owner)){
+        // Idle polling also discovers work started/completed in another tab.
+        owner.timer=setTimeout(owner.poll,owner.tasks.some(task=>task.status==='running')?3000:10000);
+      }else if(_bgPollOwner===owner) stopBackgroundPolling();
+    }
+  };
+  owner.poll();
+}
+if(typeof window!=='undefined'){
+  window.addEventListener('pagehide',stopBackgroundPolling);
+  window.addEventListener('pageshow',()=>{
+    if(S.session) startBackgroundPolling(S.session.session_id);
+  });
 }
 
 // ── Panel navigation (Chat / Tasks / Skills / Memory) ──
