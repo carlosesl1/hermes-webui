@@ -1518,32 +1518,21 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 "PENDING discard failed for session %s", session_id, exc_info=True
             )
         started = 0
-        # Greptile P1 fix: do NOT fire one daemon-threaded wakeup per entry in
-        # a tight loop. Each ``_start_server_side_wakeup_turn`` spawns a daemon
-        # thread that races for the per-session agent lock; only ONE can win,
-        # the rest 409. Since we already claimed + popped every entry (line
-        # ~938) and discarded the PENDING marker, the losers' prompts would be
-        # permanently lost. Instead: start exactly the FIRST prompt, and
-        # re-defer the remaining entries so each subsequent turn-teardown
-        # (or next-turn drain) delivers the next one — one wakeup per turn,
-        # which matches the single-prompt-per-turn design and the
-        # BG_TASK_COMPLETE_EVENTS_SEEN dedup (no double-fire).
-        leftover = [e for e in entries if str((e or {}).get("wakeup_prompt") or "").strip()]
-        if leftover:
-            first = leftover[0]
-            # Re-defer entries 2..N BEFORE starting the first turn, so they are
-            # already persisted if the first wakeup's own teardown re-runs this
-            # hook and tries to claim them.
-            for entry in leftover[1:]:
-                record_deferred_wakeup(
-                    session_id,
-                    str((entry or {}).get("process_id") or ""),
-                    str((entry or {}).get("wakeup_prompt") or "").strip(),
-                )
-            _start_server_side_wakeup_turn(
+        # Deliver a bounded group in one continuation rather than an N-turn
+        # acknowledgement cascade. Keep whole overflow events queued BEFORE
+        # dispatch; the existing 409 path requeues the entire stable batch.
+        from api.background_batch import coalesce_wakeup_entries
+
+        prompt, process_id, remaining = coalesce_wakeup_entries(entries)
+        for entry in remaining:
+            record_deferred_wakeup(
                 session_id,
-                str((first or {}).get("wakeup_prompt") or "").strip(),
-                process_id=str((first or {}).get("process_id") or ""),
+                str(entry.get("process_id") or ""),
+                str(entry.get("wakeup_prompt") or ""),
+            )
+        if prompt:
+            _start_server_side_wakeup_turn(
+                session_id, prompt, process_id=process_id,
             )
             started = 1
         if started:

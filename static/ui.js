@@ -16716,7 +16716,9 @@ function _processWakeupCardHtml(info, rawText, extras){
   const exitKnown=/^-?\d+$/.test(exitStr);
   const exitOk=exitStr==='0';
   let chip;
-  if(isWatch){
+  if(info.type==='completion_batch'){
+    chip=`<span class="process-wakeup-chip neutral">${li('layers',11)}<span>${esc(t('background_activity_available'))}</span></span>`;
+  }else if(isWatch){
     chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
   }else{
     const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
@@ -16751,6 +16753,7 @@ function renderMessages(options){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
   }
+  const _backgroundOwners=typeof backgroundActivityOwners==='function'?backgroundActivityOwners(S.messages):new Map();
   const msgCount=S.messages.length;
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
@@ -16804,6 +16807,7 @@ function renderMessages(options){
       _rehydrateDeferredWorklogsFromCache(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      if(typeof syncBackgroundActivity==='function') syncBackgroundActivity(inner);
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
@@ -16875,6 +16879,7 @@ function renderMessages(options){
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
   const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
+  if(typeof prepareBackgroundActivityRender==='function') prepareBackgroundActivityRender(inner);
   _recycleStash.clear();
   if(_msgNodeRecycleEnabled){
     for(const child of Array.from(inner.children)){
@@ -17177,7 +17182,7 @@ function renderMessages(options){
         }
       }
     }
-    const isProcessWakeup=m&&m._source==='process_wakeup';
+    const isProcessWakeup=!!(m&&(m._source==='process_wakeup'||(typeof backgroundActivityOwners==='function'&&_backgroundOwners.has(rawIdx)&&m.role==='user')));
     const isUser=m.role==='user';
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
@@ -18353,6 +18358,7 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
+  if(typeof syncBackgroundActivity==='function') syncBackgroundActivity(inner);
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built

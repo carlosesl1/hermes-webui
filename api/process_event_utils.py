@@ -93,6 +93,9 @@ def wakeup_display_meta(text: Any) -> dict | None:
     rendered output verbatim (#6350 review finding 2).
     """
     body = str(text or "")
+    batch = re.match(r"\A\[BACKGROUND UPDATES\]\nEvents: (\d+); failed: (\d+)\n", body)
+    if batch:
+        return {"type": "completion_batch", "event_count": int(batch[1]), "failure_count": int(batch[2])}
     m = _WAKEUP_COMPLETION_RE.match(body)
     if m:
         exit_code: Any = m.group("exit_code")

@@ -1,0 +1,16 @@
+/* Quiet background continuation groups. Inherits active theme and skin. */
+.background-activity-group{margin:12px 0;min-width:0;max-width:100%;border-block:1px solid var(--border);color:var(--muted);}
+.background-activity-summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-height:44px;padding:8px 4px;cursor:pointer;font-family:var(--font-ui);font-size:12px;list-style:none;}
+.background-activity-summary::-webkit-details-marker{display:none;}
+.background-activity-summary::before{content:'›';font-size:18px;line-height:1;transition:transform .15s;}
+.background-activity-group[open]>.background-activity-summary::before{transform:rotate(90deg);}
+.background-activity-summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px;}
+.background-activity-title{font-weight:600;color:var(--text);overflow-wrap:anywhere;}
+.background-activity-status{font-size:11px;overflow-wrap:anywhere;}
+.background-activity-group.has-failure>.background-activity-summary .background-activity-status{color:var(--error,#dc6666);}
+.background-activity-group.is-running>.background-activity-summary .background-activity-status{color:var(--accent);}
+.background-activity-content{min-width:0;padding:0 4px 10px;}
+.background-activity-content .process-wakeup-row{margin-block:6px;}
+.background-activity-content .assistant-turn{margin-block:10px;}
+.background-activity-content .process-wakeup-text{max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;}
+@media(prefers-reduced-motion:reduce){.background-activity-summary::before{transition:none;}}
