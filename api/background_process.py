@@ -1620,8 +1620,12 @@ def _start_server_side_wakeup_turn(
             )
             status = int((resp or {}).get("_status", 200) or 200)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                # Admission did not consume these results. Keep the batch for
+                # a later human turn/recovery hook, without a retry timer loop.
+                if wakeup_prompt:
+                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.info(
-                    "server-side wakeup suppressed for session %s: provider credential state is paused",
+                    "server-side wakeup deferred for session %s: provider credential state is paused",
                     session_id,
                 )
             elif status == 409:
@@ -1640,6 +1644,8 @@ def _start_server_side_wakeup_turn(
                     session_id,
                 )
             elif status >= 400:
+                if status >= 500 and wakeup_prompt:
+                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.warning(
                     "server-side wakeup failed for session %s: status=%s err=%r",
                     session_id,
@@ -1653,6 +1659,8 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("stream_id"),
                 )
         except Exception:
+            if wakeup_prompt:
+                record_deferred_wakeup(session_id, process_id, wakeup_prompt)
             logger.warning(
                 "server-side wakeup turn raised for session %s",
                 session_id,

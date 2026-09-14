@@ -8534,6 +8534,7 @@ async function handleComposerPrimaryAction(){
 function setBusy(v){
   S.busy=v;
   updateSendBtn();
+  if(typeof syncBackgroundActivity==='function') syncBackgroundActivity($('msgInner'));
   if(!v){
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
     setStatus('');

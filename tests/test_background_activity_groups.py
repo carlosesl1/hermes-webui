@@ -41,7 +41,7 @@ console.log(JSON.stringify({
     assert result['tagged']['kind'] == 'completion'
     assert result['tagged']['taskId'] == 'proc_example'
     assert result['unsupported'] is None
-    assert result['known'] is True
+    assert result['known'] is False  # known handle does not prove provenance
     assert result['explicitHuman'] is False
     assert result['quoted'] is False
     assert result['assistant'] is None

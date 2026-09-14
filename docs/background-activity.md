@@ -19,10 +19,14 @@ model-context messages, or authorization.
 - Live updates use the same group; approvals/clarifications and focused content
   must remain reachable. Expansion survives ordinary redraws in the tab. Reload
   restores the transcript with groups collapsed by default.
-- Modern metadata is authoritative. A legacy untagged notification is grouped
-  only if its exact envelope references a registry handle already present in
-  tool output in the loaded transcript. An arbitrary user quote alone is not
-  a notification. This fallback is display-only, not a source/permission stamp.
+- Only explicit `process_wakeup` provenance classifies a notification. Legacy
+  source-less messages stay visible as ordinary messages, even when their text
+  mentions a known task handle: a human can paste exactly the same envelope.
+- In virtualized windows with row spacers, group reparenting is disabled until
+  the virtualizer supports disclosure heights. Existing compact notification
+  cards remain; this preserves scroll geometry and canonical row order.
+- Keyed summaries survive reconciliation and keyboard focus. Nested approval/
+  clarify insertions expand their group; busy-state changes refresh its label.
 
 ## Intentional contract change: deferred events
 
@@ -37,8 +41,9 @@ session-owned turn; a concurrent human turn uses the existing admission guard.
 The batch limit is 16 entries and approximately 64 KiB including the header.
 Events are indivisible: overflow is queued before dispatch, and an individual
 oversized event travels alone without truncation. A stable digest of IDs and
-payloads is the retry identity, so the existing 409 path retains the entire
-batch. This does not promise that a model will never produce an acknowledgement;
+payloads is the retry identity. Busy/credential-paused admission, transient
+server errors and dispatch exceptions retain the entire batch for a later
+turn/recovery hook, without introducing a timer retry loop. This does not promise that a model will never produce an acknowledgement;
 the browser grouping is deterministic and does not depend on model compliance.
 
 The completion queue and older-core process registry have existing lifetime
@@ -48,7 +53,9 @@ tracking is a separate mechanism with its own persistence contract.
 
 ## Verification
 
-- `tests/test_background_activity_groups.py`: provenance, legacy evidence,
+- `tests/browser_background_live.py`: actual projection-source DOM probes for
+  focus, nested approvals, settled status, human provenance and virtual spacers.
+- `tests/test_background_activity_groups.py`: explicit provenance,
   human-turn ownership, no transcript mutation, failure classification.
 - `tests/test_background_wakeup_batching.py`: one continuation for siblings,
   byte/event budget and lossless overflow.

@@ -1,6 +1,40 @@
 """Coalesce deferred process notifications instead of one response per event."""
 from api import background_process as bg
 from api import config
+from api import routes
+import pytest
+
+
+@pytest.mark.parametrize('outcome', ['paused', 'server-error', 'exception'])
+def test_rejected_batch_is_retained_without_retry_spin(monkeypatch, outcome):
+    monkeypatch.setattr(bg, '_session_has_active_turn', lambda _: False)
+    monkeypatch.setattr(config, 'DEFERRED_PROCESS_WAKEUPS', {})
+    calls = []
+
+    class InlineThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    def start(*args, **kwargs):
+        calls.append(args)
+        if outcome == 'exception':
+            raise RuntimeError('admission failed')
+        return {'_status': 409 if outcome == 'paused' else 503,
+                'error': 'process_wakeup_paused' if outcome == 'paused' else 'transient'}
+
+    monkeypatch.setattr(bg.threading, 'Thread', InlineThread)
+    monkeypatch.setattr(routes, 'start_session_turn', start)
+    for i in range(3):
+        bg.record_deferred_wakeup('test', f'proc_{i}', f'event-{i}')
+    assert bg.drain_deferred_wakeups_for_session('test') == 1
+    assert len(calls) == 1
+    queued = bg.claim_deferred_wakeups('test')
+    assert len(queued) == 1
+    assert all(f'event-{i}' in queued[0]['wakeup_prompt'] for i in range(3))
+    assert queued[0]['process_id'].startswith('wakeup-batch-')
 
 
 def test_siblings_are_delivered_in_one_continuation(monkeypatch):
