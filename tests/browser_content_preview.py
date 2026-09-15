@@ -45,8 +45,24 @@ def verify_content_preview(browser,context,width,height,output):
   page.reload(wait_until='domcontentloaded')
   page.wait_for_function('(answer)=>typeof S!=="undefined"&&S.messages.at(-1)?.content===answer',arg=answer)
   assert page.get_by_text(answer,exact=True).is_visible()
+  # Export from the reloaded bounded preview must fetch the complete transcript,
+  # not silently download the clipped text currently visible in the chat.
+  page.evaluate("toggleSettings();switchSettingsSection('conversation')")
+  page.locator('#btnDownload').wait_for(state='visible')
+  with page.expect_download(timeout=120000) as download:
+   page.locator('#btnDownload').click()
+  downloaded=download.value
+  assert downloaded.failure() is None
+  markdown=Path(downloaded.path()).read_text()
+  prose=[m['content'] for m in rows if m['role'] in ('user','assistant')]
+  # Markdown's existing serializer trims only outer whitespace per message.
+  assert all(text.strip() in markdown for text in prose),'Markdown export clipped conversation text'
+  exported=context.request.get('/api/session/export?session_id='+sid)
+  assert exported.ok
+  exported_rows=exported.json().get('session',exported.json())['messages']
+  assert digest(exported_rows)==before,'JSON export changed canonical messages'
   assert not errors,errors
-  result.update(status='PASS',short_question_answer_intact=True,no_technical_notice=True,full_content_keyboard=True,canonical_unchanged=True,reload=True,page_errors=errors)
+  result.update(status='PASS',short_question_answer_intact=True,no_technical_notice=True,full_content_keyboard=True,canonical_unchanged=True,reload=True,markdown_download=True,json_export=True,page_errors=errors)
  except Exception as e:
   result.update(status='FAIL',error=str(e))
   try:page.screenshot(path=str(output/f'{width}-failure.png'),full_page=True)
