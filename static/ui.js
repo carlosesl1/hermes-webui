@@ -1345,8 +1345,12 @@ function _applyUserRowIntrinsicHeight(row, rawText){
   const h=Math.max(remembered, estimate);
   if(h>0) row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
 }
-function _measureMessageVirtualRow(inner, entry){
+function _measureMessageVirtualRow(inner, entry, renderedEntries){
   if(!inner||!entry) return 0;
+  if(typeof backgroundActivityVirtualHeight==='function'){
+    const activityHeight=backgroundActivityVirtualHeight(inner,entry,renderedEntries);
+    if(activityHeight!==null) return activityHeight;
+  }
   const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
   if(!primary) return 0;
   let totalHeight=Math.max(0, primary.getBoundingClientRect().height||0);
@@ -1380,7 +1384,7 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     const entry=renderVisWithIdx[vi];
     if(!entry) continue;
-    const totalHeight=_measureMessageVirtualRow(inner, entry);
+    const totalHeight=_measureMessageVirtualRow(inner, entry, renderVisWithIdx);
     if(totalHeight<=0) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;

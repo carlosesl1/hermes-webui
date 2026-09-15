@@ -120,6 +120,38 @@ def main():
                         page.evaluate("S.session.tool_calls=[{_content_truncated:true}];syncFullTranscriptPreview()")
                         assert page.locator('#fullTranscriptPreview button').is_visible()
                         page.evaluate('S.session.tool_calls=[];syncFullTranscriptPreview()')
+                        # Long histories use the same quiet activity model. The
+                        # spacer remains a hard boundary, never a reason to expose
+                        # automatic notifications as fresh conversational bubbles.
+                        long_rows = []
+                        for index in range(180):
+                            long_rows.extend([{'role': 'user', 'content': f'History question {index}'},
+                                              {'role': 'assistant', 'content': f'History answer {index}'}])
+                        long_rows.extend(messages())
+                        long_sid = page.evaluate('''async rows => {
+                          const r=await fetch('/api/session/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'Virtual background activity regression',messages:rows})});
+                          if(!r.ok) throw new Error('Import failed '+r.status);
+                          const d=await r.json();await loadSession(d.session.session_id);return d.session.session_id;
+                        }''', long_rows)
+                        # Load complete rows for the explicit virtualizer exercise;
+                        # normal session-open remains the bounded server preview.
+                        page.evaluate('''async sid => {
+                          const r=await fetch('/api/session?session_id='+sid+'&messages=1&content_full=1');
+                          if(!r.ok) throw new Error('Full fixture failed '+r.status);
+                          const d=await r.json(); S.messages=d.session.messages;
+                          window._virtualizeTranscript=true; renderMessages();
+                        }''', long_sid)
+                        page.wait_for_selector('.message-virtual-spacer', state='attached')
+                        page.wait_for_selector('.background-activity-group')
+                        assert page.locator('#msgInner > .process-wakeup-row').count() == 0
+                        assert page.locator('.background-activity-group[open]').count() == 0
+                        assert page.get_by_text('Esta resposta pertence à nova pergunta.', exact=True).is_visible()
+                        assert not page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
+                        page.locator('.background-activity-summary').last.click()
+                        page.wait_for_function('''() => [...document.querySelectorAll('.background-activity-group')].some(g=>g.open)''')
+                        assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
+                        page.screenshot(path=str(output/f'{width}-virtualized-activity.png'), full_page=True)
+                        assert page.evaluate('document.documentElement.scrollWidth') <= width
                         assert not errors, errors
                         results.append({'viewport': [width, height], 'session': sid, 'geometry': geometry, 'errors': errors, 'full_content_button': True, 'passed': True})
                         context.close()

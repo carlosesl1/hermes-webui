@@ -42,7 +42,7 @@ def verify_live_projection(browser):
           return backgroundActivityOwners([{role:'tool',content:'proc_example'},
             {role:'user',content},{role:'assistant',content:'Explain the pasted result'}]).size;
         }""") == 0
-        # Until the virtualizer models groups, don't reparent/remeasure its rows.
+        # Separate rendered windows stay compact without crossing their spacer.
         page.evaluate("""() => {
           prepareBackgroundActivityRender(inner); S.busy=false;
           S.messages=[{role:'user',content:'Run'},
@@ -52,8 +52,14 @@ def verify_live_projection(browser):
           inner.innerHTML='<div class="msg-row" data-msg-idx="1" style="height:200px">one</div><div class="message-virtual-spacer" style="height:3000px"></div><div class="msg-row" data-msg-idx="3" style="height:200px">tail update</div>';
           syncBackgroundActivity(inner);
         }""")
-        assert page.evaluate("[...inner.children].map(x=>x.className)") == ['msg-row', 'message-virtual-spacer', 'msg-row']
-        assert page.locator('details').count() == 0
+        assert page.evaluate("[...inner.children].map(x=>x.className)") == ['background-activity-group', 'message-virtual-spacer', 'background-activity-group']
+        assert page.locator('details').count() == 2
+        assert page.locator('.message-virtual-spacer').evaluate('e=>e.getBoundingClientRect().height') == 3000
+        assert page.evaluate('''() => {
+          const entries=[{rawIdx:1},{rawIdx:3}];
+          return entries.reduce((sum,e)=>sum+backgroundActivityVirtualHeight(inner,e,entries),0)
+            === [...inner.querySelectorAll('details')].reduce((sum,g)=>sum+g.getBoundingClientRect().height,0);
+        }''')
         return {'focus': True, 'nested_approval': True, 'settled_status': True,
                 'human_provenance': True, 'virtual_boundaries': True}
     finally:

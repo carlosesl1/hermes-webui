@@ -10,7 +10,7 @@ model-context messages, or authorization.
 ## User-facing behavior
 
 - A trusted `process_wakeup` notification and the assistant continuation it
-  causes appear inside a collapsed **Background updates** disclosure.
+  causes appear inside a collapsed **Execution activity** disclosure.
 - Consecutive updates for the same human turn share one disclosure. The preceding
   main answer stays outside it, as does the next human question and its answer.
 - Expanding reveals original commands, output, tool activity and assistant
@@ -22,9 +22,12 @@ model-context messages, or authorization.
 - Only explicit `process_wakeup` provenance classifies a notification. Legacy
   source-less messages stay visible as ordinary messages, even when their text
   mentions a known task handle: a human can paste exactly the same envelope.
-- In virtualized windows with row spacers, group reparenting is disabled until
-  the virtualizer supports disclosure heights. Existing compact notification
-  cards remain; this preserves scroll geometry and canonical row order.
+- Virtualized histories use the same quiet activity model. A spacer is a hard
+  ordering boundary: separate rendered windows receive separate disclosures,
+  never move rows across spacers. Virtual height measurements allocate the
+  actual disclosure height across its rendered canonical entries instead of
+  caching full hidden-row heights or multiplying height by message count. Native
+  toggles trigger the existing bounded virtualizer refresh.
 - Keyed summaries survive reconciliation and keyboard focus. Nested approval/
   clarify insertions expand their group; busy-state changes refresh its label.
 
@@ -84,3 +87,6 @@ For the browser gate, install the documented browser-test dependencies and run
 and optionally `BACKGROUND_ACTIVITY_ARTIFACT_DIR` configured for the test host.
 All browser state and test sessions are temporary; never point tests at real
 user state.
+Production acceptance also requires real terminal completion/watch and asynchronous
+delegation events: verify authoritative provenance and collapsed activity before
+and after reload. Synthetic imports alone cannot certify producer integration.

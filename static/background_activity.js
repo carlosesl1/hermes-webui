@@ -84,7 +84,7 @@ function _createBackgroundActivityGroup(key,sessionId){
   group.open=_backgroundActivityOpen.get(key)===true;
   const summary=document.createElement('summary');summary.className='background-activity-summary';
   const title=document.createElement('span');title.className='background-activity-title';
-  title.textContent=_backgroundActivityLabel('background_activity_title','Background updates');
+  title.textContent=_backgroundActivityLabel('background_activity_title','Execution activity');
   const status=document.createElement('span');status.className='background-activity-status';
   summary.append(title,status);group.append(summary);
   const body=document.createElement('div');body.className='background-activity-content';group.append(body);
@@ -95,13 +95,9 @@ function syncBackgroundActivity(inner){
   _backgroundActivitySyncing=true;
   if(_backgroundActivityObserver) _backgroundActivityObserver.disconnect();
   try{
-    // The row virtualizer currently measures canonical rows, not disclosures.
-    // Keep its spacer order/heights intact instead of moving distant rows across
-    // a gap or poisoning its cache with hidden-row measurements.
-    if(inner.querySelector('.message-virtual-spacer')){
-      _unwrapBackgroundActivity(inner);
-      return;
-    }
+    // Keep each rendered window separate. A spacer is a hard boundary: never
+    // move rows across it. The virtualizer measures disclosures as shared units.
+    const virtualized=!!inner.querySelector('.message-virtual-spacer');
     const messages=S.messages||[],owners=backgroundActivityOwners(messages);
     const sessionId=S.session&&S.session.session_id||'';
     const existing=new Map(_backgroundActivityRecycled),rows=[];
@@ -112,7 +108,9 @@ function syncBackgroundActivity(inner){
       }else rows.push(node);
     }
     const groups=new Map();
+    let windowIndex=0;
     for(const row of rows){
+      if(row.matches('.message-virtual-spacer')){windowIndex++;continue;}
       if(!row.matches('.msg-row,.assistant-turn')) continue;
       const indexed=row.hasAttribute('data-msg-idx')?row:row.querySelector('[data-msg-idx]');
       let raw=indexed?Number(indexed.dataset.msgIdx):NaN;
@@ -124,7 +122,7 @@ function syncBackgroundActivity(inner){
         continue;
       }
       const absolute=typeof _messageSessionIndexForRawIdx==='function'?_messageSessionIndexForRawIdx(entry.owner):entry.owner;
-      const key=sessionId+':'+absolute;
+      const key=sessionId+':'+absolute+(virtualized?':window:'+windowIndex:'');
       let record=groups.get(key);
       if(!record){
         const group=existing.get(key)||_createBackgroundActivityGroup(key,sessionId);
@@ -149,7 +147,7 @@ function syncBackgroundActivity(inner){
     }
     groups.forEach(record=>{
       const {group,status}=record;
-      let state=record.live?_backgroundActivityLabel('background_activity_running','Working'):_backgroundActivityLabel('background_activity_available','View updates');
+      let state=record.live?_backgroundActivityLabel('background_activity_running','Working'):_backgroundActivityLabel('background_activity_available','Updates available');
       if(record.failed) state=_backgroundActivityLabel('background_activity_failure','Includes a failed task');
       const label=record.events.size+' · '+state;
       if(status.textContent!==label) status.textContent=label;
@@ -166,6 +164,21 @@ function syncBackgroundActivity(inner){
     observeBackgroundActivity(inner);
   }
 }
+// Allocate each disclosure's actual height across only the rendered canonical
+// entries it owns. Hidden descendants must never be cached at their full height,
+// and a repeated window must never count the same group once per message.
+function backgroundActivityVirtualHeight(inner,entry,renderedEntries){
+  if(!inner||!entry||!Array.isArray(renderedEntries)) return null;
+  const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
+  const group=primary&&primary.closest('.background-activity-group');
+  if(!group||group.parentElement!==inner) return null;
+  let members=0;
+  for(const item of renderedEntries){
+    const node=inner.querySelector(`[data-msg-idx="${item.rawIdx}"]`);
+    if(node&&node.closest('.background-activity-group')===group) members++;
+  }
+  return members?Math.max(1,group.getBoundingClientRect().height/members):null;
+}
 function observeBackgroundActivity(inner){
   if(typeof MutationObserver==='undefined'||!inner) return;
   if(_backgroundActivityRoot!==inner){
@@ -176,7 +189,11 @@ function observeBackgroundActivity(inner){
     });
     inner.addEventListener('toggle',event=>{
       const group=event.target;
-      if(group.matches&&group.matches('.background-activity-group')) _rememberBackgroundActivityOpen(group.dataset.backgroundOwner,group.open);
+      if(group.matches&&group.matches('.background-activity-group')){
+        _rememberBackgroundActivityOpen(group.dataset.backgroundOwner,group.open);
+        // Disclosure geometry, not hidden descendants, is the virtual unit.
+        if(inner.querySelector('.message-virtual-spacer')&&typeof _scheduleMessageVirtualizedRender==='function') _scheduleMessageVirtualizedRender(true);
+      }
     },true);
   }
   // Approvals and clarify cards are inserted inside the existing live shell,
