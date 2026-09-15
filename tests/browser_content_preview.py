@@ -35,9 +35,11 @@ def verify_content_preview(browser,context,width,height,output):
   page.screenshot(path=str(output/f'{width}-readable-preview.png'),full_page=True)
   # Explicit opt-in must still recover every original message, without a second
   # prose-matching pass or changing the saved transcript.
+  page.evaluate('''()=>{const original=expandFullTranscript;window.__previewFailure=null;window.expandFullTranscript=async function(){try{return await original()}catch(e){window.__previewFailure=String(e.stack||e);throw e}}}''')
   control=page.locator('.message-preview-expand').last
   control.scroll_into_view_if_needed();control.focus();control.press('Enter')
-  page.wait_for_function('()=>!S.messages.some(m=>m._content_truncated)',timeout=120000)
+  page.wait_for_function('()=>window.__previewFailure || !S.messages.some(m=>m._content_truncated)',timeout=120000)
+  assert not page.evaluate('window.__previewFailure'), page.evaluate('window.__previewFailure')
   assert page.locator('.message-preview-expand').count()==0
   assert digest(full())==before
   page.reload(wait_until='domcontentloaded')

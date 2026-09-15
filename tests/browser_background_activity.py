@@ -163,6 +163,9 @@ def main():
                         page.screenshot(path=str(output/f'{width}-virtualized-activity.png'), full_page=True)
                         assert page.evaluate('document.documentElement.scrollWidth') <= width
                         assert not errors, errors
+                        # Release this page's SSE connections before opening the
+                        # next case on the local HTTP/1.1 server (six per origin).
+                        page.close()
                         from browser_content_preview import verify_content_preview
                         preview_result = verify_content_preview(browser, context, width, height, output/'prose-preview')
                         results.append({'viewport': [width, height], 'session': sid, 'geometry': geometry, 'errors': errors, 'full_content_button': True, 'preview_readability': preview_result, 'passed': True})
