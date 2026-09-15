@@ -1985,6 +1985,14 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             result_messages[_checkpoint_idx] = retained_checkpoint
         else:
             _mark_active_turn_checkpoint(existing_checkpoint, identity)
+            # Core echoes do not carry WebUI provenance. Alignment below
+            # adopts this token-owned context row as the display checkpoint,
+            # so the later display merge skips its normal source stamp.
+            # Stamp only the exact resolved current-turn row, never its text
+            # lookalikes or historical messages.
+            stamp_message_source(
+                existing_checkpoint, identity.get('source') or source or 'webui',
+            )
         return result_messages
     previous_context = list(previous_context or [])
     if _messages_have_prefix(result_messages, previous_context):
