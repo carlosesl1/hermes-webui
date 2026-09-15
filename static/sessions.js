@@ -3900,12 +3900,52 @@ async function _ensureAllMessagesLoaded(force = false) {
   }
 }
 
+// Only transport metadata may expose this action; a human can quote any notice.
+function messageContentPreviewHtml(message){
+  if(!message?._content_truncated || message._preview_content_truncated===false) return '';
+  const sid=S.session?.session_id;
+  if(!sid) return '';
+  return `<button type="button" class="message-preview-expand" data-session-id="${esc(sid)}" onclick="expandMessagePreview(this)" style="display:inline-flex;align-items:center;min-height:32px;margin-top:6px;padding:4px 0;border:0;background:transparent;color:var(--accent);font:inherit;font-size:12px;text-decoration:underline;text-underline-offset:3px;cursor:pointer">${esc(t('message_preview_expand'))}</button>`;
+}
+
+async function expandMessagePreview(button){
+  const sid=button.dataset.sessionId;
+  if(!sid || S.session?.session_id!==sid || button.disabled) return;
+  const row=button.closest('[data-session-msg-idx]');
+  const index=row?.dataset.sessionMsgIdx;
+  button.disabled=true;button.setAttribute('aria-busy','true');
+  button.textContent=t('message_preview_loading');
+  try{
+    await expandFullTranscript();
+    if(S.session?.session_id===sid && /^\d+$/.test(index||'')){
+      const target=$('msgInner')?.querySelector(`[data-session-msg-idx="${index}"]`);
+      if(target){target.setAttribute('tabindex','-1');target.focus({preventScroll:true});}
+    }
+  }catch(error){
+    if(S.session?.session_id===sid) showToast(t('history_preview_error'));
+  }finally{
+    button.disabled=false;button.removeAttribute('aria-busy');
+    button.textContent=t('message_preview_expand');
+  }
+}
+
 // Explicit opt-in: the potentially large full transcript is never fetched by
 // background polling. The renderer can bind its preview disclosure to this.
+const _fullTranscriptLoads=new Map();
 async function expandFullTranscript() {
   const sid = S.session?.session_id;
-  await _ensureAllMessagesLoaded(true);
-  if (S.session?.session_id === sid) renderMessages({ preserveScroll: true });
+  if(!sid) return;
+  if(_fullTranscriptLoads.has(sid)) return _fullTranscriptLoads.get(sid);
+  const loading=(async()=>{
+    await _ensureAllMessagesLoaded(true);
+    if (S.session?.session_id === sid) {
+      if((S.messages||[]).some(m=>m?._content_truncated)) throw new Error('Incomplete transcript response');
+      renderMessages({ preserveScroll: true });
+    }
+  })();
+  _fullTranscriptLoads.set(sid,loading);
+  try{return await loading;}
+  finally{if(_fullTranscriptLoads.get(sid)===loading) _fullTranscriptLoads.delete(sid);}
 }
 
 function syncFullTranscriptPreview(){

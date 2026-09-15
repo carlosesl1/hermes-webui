@@ -56,6 +56,8 @@ def main():
                     verify_live_projection(browser)
                     from browser_background_geometry import verify_geometry
                     verify_geometry(browser)
+                    from browser_preview_controls import verify_preview_controls
+                    verify_preview_controls(browser)
                     for width, height in [(1440, 900), (522, 1232), (390, 844)]:
                         context = browser.new_context(base_url=base, viewport={'width': width, 'height': height})
                         page = context.new_page()
@@ -112,8 +114,14 @@ def main():
                         rect=page.locator('#fullTranscriptPreview button').bounding_box()
                         assert rect and 0 <= rect['y'] < height, 'full-content action must stay reachable while scrolled'
                         page.screenshot(path=str(output/f'{width}-full-content-preview.png'), full_page=True)
-                        page.locator('#fullTranscriptPreview button').click()
+                        # The row itself must offer full text, not require finding
+                        # a global toolbar elsewhere in a long conversation.
+                        inline = page.locator('#msgInner .message-preview-expand')
+                        assert inline.count() == 1
+                        inline.focus()
+                        inline.press('Enter')
                         page.wait_for_function('() => !S.messages.some(m=>m._content_truncated)')
+                        assert page.locator('#msgInner .message-preview-expand').count() == 0
                         assert page.locator('#fullTranscriptPreview').count() == 0
                         assert page.evaluate('S.messages[S.messages.length-1].content') == complete
                         persisted = context.request.get(f'/api/session?session_id={full_sid}&messages=1').json()
@@ -155,7 +163,9 @@ def main():
                         page.screenshot(path=str(output/f'{width}-virtualized-activity.png'), full_page=True)
                         assert page.evaluate('document.documentElement.scrollWidth') <= width
                         assert not errors, errors
-                        results.append({'viewport': [width, height], 'session': sid, 'geometry': geometry, 'errors': errors, 'full_content_button': True, 'passed': True})
+                        from browser_content_preview import verify_content_preview
+                        preview_result = verify_content_preview(browser, context, width, height, output/'prose-preview')
+                        results.append({'viewport': [width, height], 'session': sid, 'geometry': geometry, 'errors': errors, 'full_content_button': True, 'preview_readability': preview_result, 'passed': True})
                         context.close()
                 finally:
                     browser.close()
