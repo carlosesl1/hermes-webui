@@ -63,7 +63,7 @@ def _invoke(session, query=None):
          patch("api.routes.get_state_db_session_messages", return_value=[]), \
          patch("api.routes.redact_session_data", side_effect=lambda raw: raw), \
          patch("api.routes.j", side_effect=fake_j):
-        routes.handle_get(SimpleNamespace(), parsed)
+        routes.handle_get(SimpleNamespace(_safe_webui_print=lambda *_args: None), parsed)
     return captured["data"]["session"]
 
 
@@ -227,7 +227,8 @@ def test_msg_limit_tail_truncates_large_hidden_tool_results():
     assert tool_msg["_content_truncated"] is True
     assert tool_msg["_content_original_chars"] == len(huge_tool_output)
     assert len(tool_msg["content"]) < len(huge_tool_output)
-    assert "Tool output truncated" in tool_msg["content"]
+    assert tool_msg["content"] == huge_tool_output[:4096]
+    assert tool_msg["_preview_content_truncated"] is False
 
 
 def test_msg_limit_tail_does_not_signal_truncated_for_trailing_hidden_tool_rows():
@@ -276,4 +277,5 @@ def test_msg_limit_tail_preserves_list_tool_content_type_when_truncated():
     assert isinstance(tool_msg["content"], list)
     assert not isinstance(tool_msg["content"], str)
     assert tool_msg["content"][0]["type"] == "text"
-    assert "Tool output truncated" in tool_msg["content"][0]["text"]
+    assert tool_msg["content"][0]["text"] == large_list_content[0]["text"][:4096]
+    assert tool_msg["_preview_content_truncated"] is False
