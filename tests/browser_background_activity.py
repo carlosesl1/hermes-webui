@@ -58,6 +58,8 @@ def main():
                     verify_geometry(browser)
                     from browser_preview_controls import verify_preview_controls
                     verify_preview_controls(browser)
+                    from browser_preview_navigation import verify_preview_navigation
+                    verify_preview_navigation(browser)
                     for width, height in [(1440, 900), (522, 1232), (390, 844)]:
                         context = browser.new_context(base_url=base, viewport={'width': width, 'height': height})
                         page = context.new_page()

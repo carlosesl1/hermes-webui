@@ -9,7 +9,7 @@ def verify_preview_controls(browser):
  p=browser.new_page()
  try:
   p.set_content('<div id="msgInner"><div data-session-msg-idx="5" id="row"></div></div>')
-  p.add_script_tag(content="window.S={session:{session_id:'one'},messages:[{_content_truncated:true}]};window.calls=0;window.renders=0;window.toasts=0;function $(id){return document.getElementById(id)};function esc(x){return x};function t(x){return x};function showToast(){toasts++};function renderMessages(){renders++};function _ensureAllMessagesLoaded(){calls++;return new Promise((resolve,reject)=>{window.resolveLoad=()=>{S.messages=[{content:'Complete'}];resolve()};window.rejectLoad=reject})};"+source[start:end])
+  p.add_script_tag(content="window._loadSessionGeneration=1;window.S={session:{session_id:'one'},messages:[{_content_truncated:true}]};window.calls=0;window.renders=0;window.toasts=0;function $(id){return document.getElementById(id)};function esc(x){return x};function t(x){return x};function showToast(){toasts++};function renderMessages(){renders++};function _ensureAllMessagesLoaded(){calls++;return new Promise((resolve,reject)=>{window.resolveLoad=()=>{S.messages=[{content:'Complete'}];resolve()};window.rejectLoad=reject})};"+source[start:end])
   result=p.evaluate('''async()=>{
     const literal={content:'[Content truncated in paginated preview; open the full transcript to inspect the complete content.]'};
     const flags=messageContentPreviewHtml(literal)==='' && messageContentPreviewHtml({_content_truncated:true,_preview_content_truncated:false})==='';
