@@ -49,7 +49,7 @@ let _backgroundActivityObserver=null;
 let _backgroundActivityRoot=null;
 let _backgroundActivitySyncing=false;
 let _backgroundActivityRecycled=new Map();
-let _backgroundActivityFocusedSummary='';
+let _backgroundActivityFocusedSummary=null;
 function _backgroundActivityLabel(key,fallback){
   const value=typeof t==='function'?t(key):'';
   return value&&value!==key?value:fallback;
@@ -64,8 +64,8 @@ function _unwrapBackgroundActivity(inner){
   for(const group of Array.from(inner.children).filter(n=>n.classList.contains('background-activity-group'))){
     const key=group.dataset.backgroundOwner;
     _rememberBackgroundActivityOpen(key,group.open);
-    _backgroundActivityRecycled.set(key,group);
-    if(group.querySelector('summary')===document.activeElement) _backgroundActivityFocusedSummary=key;
+    _backgroundActivityRecycled.set(group.dataset.backgroundFragment,group);
+    if(group.querySelector('summary')===document.activeElement) _backgroundActivityFocusedSummary={owner:key,index:Number(group.dataset.backgroundStart)};
     const body=group.querySelector('.background-activity-content');
     if(body) while(body.firstChild) inner.insertBefore(body.firstChild,group);
     group.remove();
@@ -74,7 +74,7 @@ function _unwrapBackgroundActivity(inner){
 function prepareBackgroundActivityRender(inner){
   if(_backgroundActivityObserver) _backgroundActivityObserver.disconnect();
   _backgroundActivityRecycled.clear();
-  _backgroundActivityFocusedSummary='';
+  _backgroundActivityFocusedSummary=null;
   _unwrapBackgroundActivity(inner);
 }
 function _createBackgroundActivityGroup(key,sessionId){
@@ -97,17 +97,16 @@ function syncBackgroundActivity(inner){
   try{
     // Keep each rendered window separate. A spacer is a hard boundary: never
     // move rows across it. The virtualizer measures disclosures as shared units.
-    const virtualized=!!inner.querySelector('.message-virtual-spacer');
     const messages=S.messages||[],owners=backgroundActivityOwners(messages);
     const sessionId=S.session&&S.session.session_id||'';
     const existing=new Map(_backgroundActivityRecycled),rows=[];
     for(const node of Array.from(inner.children)){
       if(node.classList.contains('background-activity-group')){
-        existing.set(node.dataset.backgroundOwner,node);
+        existing.set(node.dataset.backgroundFragment,node);
         rows.push(...node.querySelector('.background-activity-content').children);
       }else rows.push(node);
     }
-    const groups=new Map();
+    const groups=new Map(),used=new Set();
     let windowIndex=0;
     for(const row of rows){
       if(row.matches('.message-virtual-spacer')){windowIndex++;continue;}
@@ -122,15 +121,24 @@ function syncBackgroundActivity(inner){
         continue;
       }
       const absolute=typeof _messageSessionIndexForRawIdx==='function'?_messageSessionIndexForRawIdx(entry.owner):entry.owner;
-      const key=sessionId+':'+absolute+(virtualized?':window:'+windowIndex:'');
+      const ownerKey=sessionId+':'+absolute;
+      const key=ownerKey+':window:'+windowIndex; // grouping only, never persisted
+      const rowIndex=typeof _messageSessionIndexForRawIdx==='function'?_messageSessionIndexForRawIdx(raw):raw;
       let record=groups.get(key);
       if(!record){
-        const group=existing.get(key)||_createBackgroundActivityGroup(key,sessionId);
+        // Window topology may change while this fragment remains mounted.
+        // Persist disclosure state by canonical owner; recycle DOM by first row.
+        const fragment=ownerKey+':fragment:'+rowIndex;
+        const group=existing.get(fragment)||_createBackgroundActivityGroup(ownerKey,sessionId);
+        group.dataset.backgroundFragment=fragment;
+        group.dataset.backgroundStart=String(rowIndex);
+        used.add(group);
         const body=group.querySelector('.background-activity-content');
         if(group.parentElement!==inner) inner.insertBefore(group,row.parentElement===inner?row:null);
         record={group,body,status:group.querySelector('.background-activity-status'),events:new Set(),failed:false,live:false};
         groups.set(key,record);
       }
+      record.group.dataset.backgroundEnd=String(rowIndex);
       // Don't detach already-owned rows or summaries: browser focus and live
       // renderer references must survive token and nested-control updates.
       if(row.parentElement!==record.body) record.body.appendChild(row);
@@ -138,8 +146,8 @@ function syncBackgroundActivity(inner){
       record.failed=record.failed||entry.failed;
       record.live=record.live||!!(S.busy&&raw>=messages.length-1);
     }
-    for(const [key,group] of existing){
-      if(!groups.has(key)&&group.parentElement===inner){
+    for(const group of existing.values()){
+      if(!used.has(group)&&group.parentElement===inner){
         const body=group.querySelector('.background-activity-content');
         while(body.firstChild) inner.insertBefore(body.firstChild,group);
         group.remove();
@@ -155,10 +163,12 @@ function syncBackgroundActivity(inner){
       group.classList.toggle('is-running',record.live);
       if(group.querySelector('.clarify-card,.approval-card,[data-approval-id]')||
          (group.contains(document.activeElement)&&document.activeElement!==group.querySelector('summary'))) group.open=true;
-      if(_backgroundActivityFocusedSummary===group.dataset.backgroundOwner) group.querySelector('summary').focus({preventScroll:true});
+      const focused=_backgroundActivityFocusedSummary;
+      if(focused&&focused.owner===group.dataset.backgroundOwner&&
+         focused.index>=Number(group.dataset.backgroundStart)&&focused.index<=Number(group.dataset.backgroundEnd)) group.querySelector('summary').focus({preventScroll:true});
     });
   }finally{
-    _backgroundActivityFocusedSummary='';
+    _backgroundActivityFocusedSummary=null;
     _backgroundActivityRecycled.clear();
     _backgroundActivitySyncing=false;
     observeBackgroundActivity(inner);
@@ -177,7 +187,8 @@ function backgroundActivityVirtualHeight(inner,entry,renderedEntries){
     const node=inner.querySelector(`[data-msg-idx="${item.rawIdx}"]`);
     if(node&&node.closest('.background-activity-group')===group) members++;
   }
-  return members?Math.max(1,group.getBoundingClientRect().height/members):null;
+  const height=group.getBoundingClientRect().height;
+  return members&&height>0?height/members:null;
 }
 function observeBackgroundActivity(inner){
   if(typeof MutationObserver==='undefined'||!inner) return;
@@ -191,6 +202,10 @@ function observeBackgroundActivity(inner){
       const group=event.target;
       if(group.matches&&group.matches('.background-activity-group')){
         _rememberBackgroundActivityOpen(group.dataset.backgroundOwner,group.open);
+        // Split DOM fragments are still one canonical execution disclosure.
+        for(const peer of inner.querySelectorAll('.background-activity-group')){
+          if(peer!==group&&peer.dataset.backgroundOwner===group.dataset.backgroundOwner&&peer.open!==group.open) peer.open=group.open;
+        }
         // Disclosure geometry, not hidden descendants, is the virtual unit.
         if(inner.querySelector('.message-virtual-spacer')&&typeof _scheduleMessageVirtualizedRender==='function') _scheduleMessageVirtualizedRender(true);
       }

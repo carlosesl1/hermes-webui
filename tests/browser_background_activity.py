@@ -54,6 +54,8 @@ def main():
                 try:
                     from browser_background_live import verify_live_projection
                     verify_live_projection(browser)
+                    from browser_background_geometry import verify_geometry
+                    verify_geometry(browser)
                     for width, height in [(1440, 900), (522, 1232), (390, 844)]:
                         context = browser.new_context(base_url=base, viewport={'width': width, 'height': height})
                         page = context.new_page()

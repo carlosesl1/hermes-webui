@@ -1388,7 +1388,10 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     if(totalHeight<=0) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
-    if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
+    const previous=Number(_messageVirtualHeightCache[visibleIdx]);
+    // A collapsed disclosure may allocate less than one pixel per canonical row.
+    // Initialize those entries too, or role estimates leave phantom spacer gaps.
+    if(!(previous>0)||Math.abs(previous-totalHeight)>1){
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
     }

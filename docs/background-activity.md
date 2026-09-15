@@ -27,7 +27,11 @@ model-context messages, or authorization.
   never move rows across spacers. Virtual height measurements allocate the
   actual disclosure height across its rendered canonical entries instead of
   caching full hidden-row heights or multiplying height by message count. Native
-  toggles trigger the existing bounded virtualizer refresh.
+  toggles trigger the existing bounded virtualizer refresh. Fractional positive
+  heights initialize the measurement cache even below its update tolerance.
+  Disclosure state uses canonical ownership, while DOM fragments use canonical
+  row identity: adding/removing a spacer cannot reset expansion or focus, and
+  split fragments remain separate across the spacer.
 - Keyed summaries survive reconciliation and keyboard focus. Nested approval/
   clarify insertions expand their group; busy-state changes refresh its label.
 

@@ -60,6 +60,10 @@ def verify_live_projection(browser):
           return entries.reduce((sum,e)=>sum+backgroundActivityVirtualHeight(inner,e,entries),0)
             === [...inner.querySelectorAll('details')].reduce((sum,g)=>sum+g.getBoundingClientRect().height,0);
         }''')
+        page.locator('details').last.locator('summary').click()
+        page.wait_for_function("() => [...inner.querySelectorAll('details')].every(g=>!g.open)")
+        page.locator('details').last.locator('summary').click()
+        page.wait_for_function("() => [...inner.querySelectorAll('details')].every(g=>g.open)")
         return {'focus': True, 'nested_approval': True, 'settled_status': True,
                 'human_provenance': True, 'virtual_boundaries': True}
     finally:
