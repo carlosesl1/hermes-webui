@@ -73,7 +73,7 @@ def bounded_render_messages(messages, *, page_budget=None):
             continue
         leaves = prose[index]
         shares = _fair_shares([min(len(text), FIELD_CHARS) for text in leaves.values()], row_shares[index])
-        reserved = {path: text[:share] for (path, text), share in zip(leaves.items(), shares)}
+        reserved = {path: text[:share] for (path, text), share in zip(leaves.items(), shares, strict=True)}
         prose_clipped = any(len(reserved[path]) < len(text) for path, text in leaves.items())
         remaining = [ROW_CHARS - row_shares[index]]
         clipped = [prose_clipped]
