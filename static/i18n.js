@@ -373,6 +373,7 @@ const LOCALES = {
   history_preview_expand:'Load complete content',
   history_preview_error:'Could not load complete content. Try again.',
   bg_tasks:'Background tasks',
+  bg_history:(count)=>`Background activity · ${count} completed`,
   bg_task:'Background task',
   bg_status_running:'Running',
   bg_status_done:'Completed',
