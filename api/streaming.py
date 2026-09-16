@@ -10283,6 +10283,9 @@ def _run_agent_streaming(
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
 
             _AIAgent = _get_ai_agent()
+            if _AIAgent is not None:
+                from api.turn_delegation import turn_owned_agent_class
+                _AIAgent = turn_owned_agent_class(_AIAgent)
             if _AIAgent is None:
                 raise ImportError(_aiagent_import_error_detail())
 
