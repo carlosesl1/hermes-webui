@@ -17010,6 +17010,20 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
+        # Native archive/restore is a byte-preserving metadata transaction, not
+        # a full-cache save. External/CLI sidecars keep the existing fallback.
+        from api.session_auto_archive import set_archive_metadata
+        native_meta = Session.load_metadata_only(sid)
+        if (native_meta is not None
+                and not getattr(native_meta, "is_cli_session", False)
+                and not getattr(native_meta, "read_only", False)
+                and all(getattr(native_meta, key, None) in (None, "", "webui")
+                        for key in ("source_tag", "raw_source", "session_source"))):
+            updated = set_archive_metadata(sid, bool(body.get("archived", True)))
+            if updated is None:
+                return bad(handler, "Session busy or not safe for metadata-only archive; retry when idle", 409)
+            publish_session_list_changed("session_archive", profile=updated.profile, session_id=sid)
+            return j(handler, {"ok": True, "session": updated.compact(), **_worktree_retained_payload(updated)})
         try:
             s = get_session(sid)
             # #1558: save() refuses metadata-only session stubs because their
@@ -28526,6 +28540,7 @@ def _handle_session_import(handler, body):
         profile=get_active_profile_name(),
     )
     s.pinned = body.get("pinned", False)
+    s.imported = True  # provenance: never auto-archive imported JSON histories
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)

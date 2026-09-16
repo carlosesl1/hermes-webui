@@ -720,9 +720,13 @@ def main() -> None:
     except (ValueError, OSError):
         logger.debug("Could not install shutdown signal handlers", exc_info=True)
 
+    from api.session_auto_archive import AutoArchiveWorker
+    auto_archive_worker = AutoArchiveWorker()
     try:
+        auto_archive_worker.start()  # bound server; first sweep waits 60 seconds
         httpd.serve_forever()
     finally:
+        auto_archive_worker.stop()
         httpd.server_close()
         _log_shutdown_audit()
         try:

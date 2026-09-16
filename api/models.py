@@ -1299,6 +1299,9 @@ class Session:
         self.updated_at = updated_at or time.time()
         self.pinned = bool(pinned)
         self.archived = bool(archived)
+        self.imported = bool(kwargs.get('imported', False))
+        self.auto_archive_restored_at = kwargs.get('auto_archive_restored_at')
+        self.auto_archived_at = kwargs.get('auto_archived_at')
         self.project_id = project_id or None
         self.profile = profile
         self.input_tokens = input_tokens or 0
@@ -1355,7 +1358,7 @@ class Session:
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
         self.worktree_created_at = worktree_created_at
         self.is_cli_session = bool(kwargs.get('is_cli_session', False))
-        self.source_tag = kwargs.get('source_tag')
+        self.source_tag = kwargs.get('source_tag') or ('webui' if session_id is None else None)
         self.raw_source = kwargs.get('raw_source')
         self.session_source = kwargs.get('session_source')
         self.source_label = kwargs.get('source_label')
@@ -1414,7 +1417,7 @@ class Session:
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
             'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
-            'pinned', 'archived', 'project_id', 'profile',
+            'pinned', 'archived', 'auto_archive_restored_at', 'auto_archived_at', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
@@ -1434,7 +1437,7 @@ class Session:
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
-            'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
+            'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only', 'imported',
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
