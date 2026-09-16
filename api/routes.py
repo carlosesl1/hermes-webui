@@ -16694,6 +16694,10 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
+        if "auto_archive_days" in body:
+            days = body["auto_archive_days"]
+            if type(days) is not int or not 0 <= days <= 3650:
+                return bad(handler, "auto_archive_days must be an integer from 0 to 3650 (0 disables)", 400)
         from api.auth import (
             create_session,
             get_password_hash,
@@ -17010,20 +17014,6 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
-        # Native archive/restore is a byte-preserving metadata transaction, not
-        # a full-cache save. External/CLI sidecars keep the existing fallback.
-        from api.session_auto_archive import set_archive_metadata
-        native_meta = Session.load_metadata_only(sid)
-        if (native_meta is not None
-                and not getattr(native_meta, "is_cli_session", False)
-                and not getattr(native_meta, "read_only", False)
-                and all(getattr(native_meta, key, None) in (None, "", "webui")
-                        for key in ("source_tag", "raw_source", "session_source"))):
-            updated = set_archive_metadata(sid, bool(body.get("archived", True)))
-            if updated is None:
-                return bad(handler, "Session busy or not safe for metadata-only archive; retry when idle", 409)
-            publish_session_list_changed("session_archive", profile=updated.profile, session_id=sid)
-            return j(handler, {"ok": True, "session": updated.compact(), **_worktree_retained_payload(updated)})
         try:
             s = get_session(sid)
             # #1558: save() refuses metadata-only session stubs because their
@@ -17097,6 +17087,8 @@ def handle_post(handler, parsed) -> bool:
                 s.platform = cli_meta.get("platform")
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
+            if not s.archived:
+                s.auto_archive_restored_at = time.time()
             s.save(touch_updated_at=False)
         publish_session_list_changed(
             "session_archive",

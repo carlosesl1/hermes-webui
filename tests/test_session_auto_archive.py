@@ -54,7 +54,7 @@ def test_disabled_invalid_no_files_touched(env, days, monkeypatch):
 @pytest.mark.parametrize("fields", [{"pinned":True},{"active_stream_id":"busy"},
     {"pending_user_message":"queued"},{"pending_attachments":["x"]},
     {"source_tag":None},{"source_tag":"subagent"},{"source_tag":"unknown"},{"is_cli_session":True},
-    {"read_only":True},{"imported":True},{"parent_session_id":"parent"},{"pre_compression_snapshot":True},
+    {"read_only":True},{"imported":True},{"pre_compression_snapshot":True},
     {"worktree_branch":"branch"},{"updated_at":float("nan")},{"created_at":None},
     {"updated_at":13600},{"updated_at":99999}])
 def test_exclusions(env,fields):
@@ -102,7 +102,6 @@ def test_busy_lock_failure_and_hostile_paths(env,monkeypatch):
     lock.release()
     assert not list(path.glob('.archive-*'))
     assert not models.Session.load(s.session_id).archived
-
 def test_final_busy_recheck(env,monkeypatch):
     aa,cfg,models,path=env
     s=make(env)
@@ -110,7 +109,6 @@ def test_final_busy_recheck(env,monkeypatch):
     monkeypatch.setattr(aa,'_runtime_idle',lambda sid:next(calls))
     assert aa.set_archive_metadata(s.session_id,True,now=100000) is None
     assert not models.Session.load(s.session_id).archived
-
 def test_worker_stop_and_bounded_fairness(env):
     aa,cfg,models,path=env
     for i in range(28): make(env,sid=f's{i}')
@@ -123,7 +121,7 @@ def test_worker_stop_and_bounded_fairness(env):
     assert not worker.thread.is_alive()
 
 @pytest.mark.parametrize("registry", ["ACTIVE_RUNS", "STREAMS", "SESSION_WRITEBACK_OWNERS",
-    "PROCESS_SESSION_INDEX", "DEFERRED_PROCESS_WAKEUPS", "PENDING_BG_TASK_COMPLETIONS",
+    "DEFERRED_PROCESS_WAKEUPS", "PENDING_BG_TASK_COMPLETIONS",
     "PENDING_GOAL_CONTINUATION"])
 def test_real_runtime_busy_guards(env, monkeypatch, registry):
     aa,cfg,models,path=env
@@ -183,3 +181,62 @@ def test_large_unknown_prefix_stat_race_and_no_read_archival(env,monkeypatch):
     monkeypatch.setattr(aa.os,'fsync',race)
     assert aa.set_archive_metadata(s.session_id,True,now=100000) is None
     assert s.path.read_bytes()==before+b' '
+
+
+def test_historical_source_uses_own_profile_db(env, monkeypatch):
+    import sqlite3
+    from api import profiles
+    aa, cfg, models, path = env
+    home = path / 'own-profile'
+    home.mkdir()
+    monkeypatch.setattr(profiles, '_is_isolated_profile_mode', lambda: False)
+    monkeypatch.setattr(profiles, '_resolve_profile_home_for_name', lambda name: home if name == 'own' else path / 'missing')
+    with sqlite3.connect(home / 'state.db') as db:
+        db.execute('CREATE TABLE sessions(id TEXT PRIMARY KEY, source TEXT)')
+        db.executemany('INSERT INTO sessions VALUES (?,?)', [('old', 'webui'), ('external', 'cli')])
+    old = make(env, sid='old', source_tag=None, profile='own', parent_session_id='compression-parent')
+    external = make(env, sid='external', source_tag=None, profile='own')
+    unknown = make(env, sid='unknown', source_tag=None, profile='other')
+    worker = aa.AutoArchiveWorker()
+    assert worker.sweep(now=100000) == 1
+    assert models.Session.load(old.session_id).archived
+    assert not models.Session.load(external.session_id).archived
+    assert not models.Session.load(unknown.session_id).archived
+
+
+def test_finished_process_mapping_does_not_block_forever(env, monkeypatch):
+    import sys
+    import types
+    import threading
+    from api import background
+    aa, cfg, models, path = env
+    monkeypatch.setattr(background, 'STATE_DIR', path)
+    monkeypatch.setattr(aa, '_runtime_idle', real_runtime_idle)
+    monkeypatch.setattr(cfg, 'PROCESS_SESSION_INDEX', {'receipt': 'old'})
+    registry = types.SimpleNamespace(_lock=threading.Lock(), count_running=lambda: 0)
+    monkeypatch.setitem(sys.modules, 'tools.process_registry', types.SimpleNamespace(process_registry=registry))
+    s = make(env)
+    assert aa.set_archive_metadata(s.session_id, True, now=100000) is not None
+    registry.count_running = lambda: 1
+    assert aa.set_archive_metadata(s.session_id, False, now=100001) is None
+
+
+def test_unicode_split_prefix_and_policy_changed_during_copy(env, monkeypatch):
+    aa, cfg, models, path = env
+    s = make(env)
+    s.messages = [{'role': 'user', 'content': 'ã' * 70000}]
+    s.save(touch_updated_at=False)
+    raw = s.path.read_bytes()
+    start = raw.index('ã'.encode())
+    monkeypatch.setattr(aa, 'MAX_PREFIX_BYTES', start + 1)
+    assert aa.set_archive_metadata(s.session_id, True, now=100000, days=1) is not None
+    assert digest(s.path) == hashlib.sha256(raw[raw.index(b'  "messages":'):]).hexdigest()
+    monkeypatch.setattr(aa, 'MAX_PREFIX_BYTES', 64 * 1024)
+    aa.set_archive_metadata(s.session_id, False, now=100001)
+    original_fsync = aa.os.fsync
+    def disable(fd):
+        original_fsync(fd)
+        monkeypatch.setattr(cfg, 'load_settings', lambda: {'auto_archive_days': 0})
+    monkeypatch.setattr(aa.os, 'fsync', disable)
+    assert aa.set_archive_metadata(s.session_id, True, now=300000, days=1) is None
+    assert not models.Session.load(s.session_id).archived

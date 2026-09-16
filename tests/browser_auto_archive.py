@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import socket
 import subprocess
-import sys
 import tempfile
 
 from playwright.sync_api import sync_playwright, expect
@@ -49,11 +48,10 @@ def main():
                         context = browser.new_context(viewport={'width': width, 'height': height}, base_url=smoke.BASE)
                         page = context.new_page()
                         page_errors = []
-                        page.on('pageerror', lambda e: page_errors.append(str(e)))
+                        page.on('pageerror', lambda e, errors=page_errors: errors.append(str(e)))
                         policy = {'days': 0, 'fail': False, 'posts': []}
 
-                        def settings_route(route):
-                            request = route.request
+                        def settings_route(route, request, policy=policy):
                             if request.method == 'POST' and 'auto_archive_days' in (request.post_data_json or {}):
                                 policy['posts'].append(request.post_data_json)
                                 if policy['fail']:
@@ -73,7 +71,7 @@ def main():
 
                         page.route('**/api/settings', settings_route)
 
-                        def open_preferences():
+                        def open_preferences(page=page, width=width):
                             page.goto('/', wait_until='domcontentloaded')
                             if width < 768:
                                 page.locator('#btnHamburger').click()
@@ -84,7 +82,7 @@ def main():
                             expect(page.locator('#settingsAutoArchive')).to_be_enabled()
                             page.locator('#settingsAutoArchiveField').scroll_into_view_if_needed()
 
-                        def capture(name):
+                        def capture(name, page=page, width=width):
                             page.locator('#settingsAutoArchiveField').scroll_into_view_if_needed()
                             page.screenshot(path=str(OUT / f'{width}-{name}.png'))
                             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'body overflow'
@@ -92,7 +90,7 @@ def main():
                                 box = page.locator(selector).bounding_box()
                                 assert box and box['x'] >= 0 and box['x'] + box['width'] <= width + 1, selector
 
-                        def save(value):
+                        def save(value, page=page, policy=policy):
                             page.locator('#settingsAutoArchive').select_option(value)
                             before = len(policy['posts'])
                             page.wait_for_timeout(350)

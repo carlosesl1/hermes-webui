@@ -1,81 +1,81 @@
-# Inactive native chat auto-archive
+# Inactive chat auto-archive
 
-`auto_archive_days` is an installation-wide WebUI setting: integer `0` (the
-safe default) disables it; integers `1`–`3650` enable inactivity archival.
-The same policy covers native WebUI chats in every profile in the shared
-session directory. Changing the policy takes effect on the next worker tick.
-Disabling it does not automatically restore previously archived chats.
+In Settings → Preferences, choose Disabled, 7, 30, 90 days, or a custom integer
+from 1 through 3650, then explicitly save the archive policy. The default is
+Disabled (`auto_archive_days: 0`). Merely changing the selector does not save it.
+This is an installation-wide policy for native WebUI chats across profiles, not
+a per-browser filter. Invalid API values return 400; invalid persisted policies
+fail closed to disabled. No model or external service is called.
 
-The server starts a daemon worker only after binding its HTTP socket. Its first
-sweep and subsequent sweeps wait 60 seconds using an interruptible Event. Each
-tick examines at most 25 directory entries, with a one-second scheduling budget
-checked between candidates and a persistent directory cursor for fairness.
-Disabled ticks do not scan the session directory. GET/list paths do not invoke
-this worker. Shutdown signals the worker and waits up to two seconds.
+## Eligibility and preservation
 
-A chat is eligible only when both real `created_at` and `updated_at` are valid
-positive finite numbers and their maximum is **strictly older** than the cutoff.
-Pinned, archived, pending, active, imported, CLI, read-only, unknown-source,
-parent-owned, compression-snapshot/recovery and worktree-bound records are
-excluded. Unknown or legacy metadata layouts are skipped, not migrated. New JSON imports
-retain an explicit `imported` provenance flag. Historical JSON imports that
-already lost all provenance are indistinguishable from source-less native
-sidecars. Therefore automatic archival requires at least one explicit `webui`
-source field: source-less historical chats are skipped, not guessed from titles
-or content. Newly created native sessions record that source. Manual native
-archive/restore does not require explicit source provenance.
+Activity uses the maximum of valid `created_at`, `updated_at`, and a manual
+restore timestamp. It must be strictly older than the selected interval.
+Pinned, archived, active/pending, imported, read-only, external-source,
+compression snapshot/recovery and worktree-bound sessions are excluded.
+A native continuation can be archived; its compression snapshots are preserved.
+New native chats record their source. For historical source-less chats, a
+read-only lookup in that chat's own profile database must confirm `source=webui`.
+Unknown origin, missing database, malformed timestamps and unsupported metadata
+are skipped rather than guessed or repaired. JSON imports retain provenance.
 
-The implementation is deliberately conservative: any registered worker (even
-cancelled/unwinding), SSE run, writeback owner, subprocess ownership, pending
-wakeup, /background task, /btw tracking, or manual compression job can pause
-maintenance globally. A contended runtime/session lock also skips work. This
-may delay archiving indefinitely on an installation with persistent activity
-or retained process ownership; it is preferable to racing live conversation
-writes. Existing background task storage is read-only, never initialized by the
-archive worker. No new database or independent archive flag store is added.
+The worker obtains the per-session admission lock nonblocking, parses at most
+64 KiB of metadata, and copies the transcript/tool/context suffix byte-for-byte
+to an atomic replacement. It rechecks file identity/stat, runtime activity and
+the policy before commit. Cached objects receive only archive metadata, never a
+stale transcript rewrite. The sidecar remains authoritative and its derived
+index is refreshed; list events are published per affected profile.
 
-## Data safety and restore
+Automatic maintenance never changes `updated_at`, deletes messages, compresses
+history or removes files. Existing manual archive/restore behavior is retained,
+including large chats. Restoring explicitly records `auto_archive_restored_at`
+and grants another full inactivity interval. Disabling the policy stops future
+automatic changes; it does not restore already archived conversations.
 
-The authoritative change is solely the native sidecar archive metadata. The
-worker obtains the per-session admission lock nonblocking, reads at most 64 KiB
-of metadata, writes a temporary file, and copies the raw transcript/context/tool
-suffix unchanged. It rechecks runtime busy state and file identity/stat before
-atomic replacement. Cached Session objects have only the changed attributes
-updated; the existing index is refreshed from fresh metadata, never from an
-empty metadata stub or stale cached transcript. Sidebar notifications are
-published once per affected profile after a batch. Neither archiving nor
-restoring changes `updated_at`.
+## Scheduling and conservative limits
 
-Manual native archive/restore uses the same transaction. Restoring records
-`auto_archive_restored_at`, granting another entire inactivity interval before
-that chat can be automatically archived again. The existing archived-chat UI
-can still display and restore history. External/CLI fallback behavior is not
-changed. A busy or unsupported native manual operation returns HTTP 409 rather
-than risking a full transcript rewrite.
+One stoppable in-process worker starts after HTTP binding, waits 60 seconds,
+then examines at most 25 directory entries per tick with a persistent cursor.
+There is a one-second between-candidate scheduling budget. Disabled ticks do
+not scan the directory. No GET/list request triggers maintenance writes.
+Copy/fsync can exceed that budget on slow storage; files above 8 MiB,
+symlinks/hardlinks and unsupported metadata layouts are skipped automatically.
 
-The fast safe path refuses files larger than 8 MiB, symlinks, hardlinks, unsafe
-session IDs and oversized/unknown metadata prefixes. Such native files cannot
-use this metadata-only manual archive path either. The one-second tick budget
-is not a hard filesystem I/O deadline; one bounded file copy/fsync may exceed
-it on slow storage. The design assumes the existing single WebUI writer process;
-other processes editing the same sidecar without its admission lock remain
-outside that concurrency contract. Atomic stat checks reduce but cannot turn
-uncoordinated external writes into a cross-process transaction.
+Any live agent worker (including cancellation unwind), SSE run, writeback owner,
+running subprocess, pending wakeup, background/btw task or manual compression
+pauses maintenance globally. Contended locks also skip work. A process ownership
+receipt alone does not block when the loaded registry confirms no running
+processes. Continuous activity can delay archiving; this conservative policy
+prefers chat reliability over immediate housekeeping. No new database/schema is
+introduced. Existing single-WebUI-writer assumptions remain.
 
-## Performance scope and rollback
+## Performance scope
 
-Archiving hides inactive rows from the ordinary sidebar payload and reduces
-browser rendering work. It does **not** delete messages, shrink `state.db`,
-remove JSON files from disk, or eliminate the existing full directory/database
-list scans. No latency or memory improvement is claimed without measurement.
-Set `auto_archive_days` back to `0` to stop new automatic changes; restore chats
-individually as needed. There is no schema migration to roll back.
+Archiving reduces the normal sidebar response and browser rendering work. It
+**does not** shrink the underlying database or eliminate directory/database
+scans. No latency improvement is promised without measurement. Settings are
+read on each scheduled tick; browser refresh is not required for the worker.
 
 ## Verification
 
-`./scripts/test.sh -q tests/test_session_auto_archive.py` covers invalid/disabled
-policies, exact cutoff, recent activity, protected records, profiles, lock and
-write failures, byte hashes of the full transcript suffix across archive and
-restore, stale full/metadata caches, index/reload visibility, restore grace,
-batch fairness, hostile paths and worker shutdown. Run with isolated
-`HERMES_HOME`, `HERMES_WEBUI_STATE_DIR` and test state, never live credentials.
+Use the isolated repository runner for `test_session_auto_archive.py`,
+`test_settings_auto_archive.py`, metadata-save and archive regression suites.
+Coverage includes cutoff, protections, historical profile/source lookup,
+byte-identical transcript suffix, stale cache safety, index/reload, restore
+grace, disabled/changed policies, Unicode boundaries, write/stat failures,
+process receipts, fairness, shutdown and hostile paths.
+
+`tests/browser_auto_archive.py` exercises the actual Settings controls at
+1440×900 and 522×1232: explicit save, custom days, validation, reload, disable,
+keyboard, an injected API failure and Portuguese copy. Its default mode uses
+the real isolated API; optional mocked mode is labeled as UI-only evidence.
+
+`tests/verify_auto_archive_worker.py` starts an isolated real HTTP server and
+waits for its actual scheduled tick (no model calls). It checks visible/all
+lists, transcript-suffix hashes, manual restore and disabling the policy.
+A measured 10-chat synthetic fixture archived 8 eligible chats while protecting
+recent/pinned chats: the normal payload changed from 8,657 to 1,992 bytes.
+Single-request local timings were 7.614 ms before and 7.505 ms after; these are
+**not** evidence of a production latency improvement. All 10 transcripts stayed
+byte-identical through automatic archival. Targeted integration: 412 tests in
+38 files passed; real-API Settings QA passed at 1440×900 and 522×1232.

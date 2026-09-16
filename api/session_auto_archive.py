@@ -5,7 +5,8 @@ full cache can lag the transcript on disk. No GET/list handler calls the sweep.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager, ExitStack
+from contextlib import closing, contextmanager, ExitStack
+import codecs
 import json
 import logging
 import math
@@ -47,12 +48,31 @@ def _native(meta, sid):
                     ('source_tag', 'raw_source', 'session_source')))
 
 
-def _eligible(meta, now, days):
-    # Historical JSON imports lost provenance. Do not infer native ownership
-    # from a missing source tag, file layout, title, or transcript contents.
-    if not any(meta.get(k) == 'webui' for k in ('source_tag', 'raw_source', 'session_source')):
+def _native_provenance(meta):
+    """Confirm historical source from its own profile DB; never guess from prose."""
+    if any(meta.get(k) == 'webui' for k in ('source_tag', 'raw_source', 'session_source')):
+        return True
+    from api import profiles
+    profile = meta.get('profile')
+    if profile and not profiles._is_root_profile(profile) and not profiles._PROFILE_ID_RE.fullmatch(profile):
         return False
-    if any(meta.get(k) for k in ('archived', 'pinned', 'imported', 'parent_session_id',
+    if profiles._is_isolated_profile_mode() and profile and not profiles._profiles_match(profile, profiles._isolated_profile_name()):
+        return False
+    path = profiles._resolve_profile_home_for_name(profile) / 'state.db'
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=0)) as db:
+            deadline = time.monotonic() + 0.02
+            db.set_progress_handler(lambda: time.monotonic() > deadline, 100)
+            row = db.execute('SELECT source FROM sessions WHERE id=?', (meta['session_id'],)).fetchone()
+            return bool(row and row[0] == 'webui')
+    except (OSError, sqlite3.Error):
+        return False
+
+
+def _eligible(meta, now, days):
+    if any(meta.get(k) for k in ('archived', 'pinned', 'imported',
             'pre_compression_snapshot', 'worktree_path', 'worktree_branch',
             'worktree_repo_root', 'worktree_created_at', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
@@ -62,13 +82,14 @@ def _eligible(meta, now, days):
     grace = meta.get('auto_archive_restored_at')
     if grace is not None:
         times.append(grace)
-    return all(_timestamp(t) for t in times) and max(times) < now - days * 86400
+    return (all(_timestamp(t) for t in times) and max(times) < now - days * 86400
+            and _native_provenance(meta))
 
 
 def _prefix(file):
     """Parse only complete top-level metadata values, never a message array."""
     raw = file.read(MAX_PREFIX_BYTES)
-    text = raw.decode('utf-8', errors='strict')
+    text = codecs.getincrementaldecoder('utf-8')().decode(raw, final=False)
     decoder = json.JSONDecoder()
     pos = 0
     while pos < len(text) and text[pos].isspace(): pos += 1
@@ -105,13 +126,23 @@ def _runtime_idle(sid):
     workers, registered subprocesses and pending wakeups, not only SSE.
     """
     for name in ('ACTIVE_RUNS', 'STREAMS', 'SESSION_WRITEBACK_OWNERS',
-                 'PROCESS_SESSION_INDEX', 'DEFERRED_PROCESS_WAKEUPS',
+                 'DEFERRED_PROCESS_WAKEUPS',
                  'PENDING_BG_TASK_COMPLETIONS', 'PENDING_GOAL_CONTINUATION'):
         if getattr(config, name):
             return False
+    if config.PROCESS_SESSION_INDEX:
+        module = sys.modules.get('tools.process_registry')
+        registry = getattr(module, 'process_registry', None)
+        if registry is None or not callable(getattr(registry, 'count_running', None)):
+            return False
+        try:
+            if registry.count_running():
+                return False
+        except Exception:
+            return False
     cached = config.SESSIONS.get(sid)
     if cached and any(getattr(cached, k, None) for k in
-            ('active_stream_id', 'pending_user_message', 'pending_attachments', 'pending_started_at')):
+            ('pinned', 'active_stream_id', 'pending_user_message', 'pending_attachments', 'pending_started_at')):
         return False
     from api import background
     if background._BTW_TRACKING:
@@ -126,7 +157,7 @@ def _runtime_idle(sid):
         return False
     if path.exists():
         try:
-            with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=0) as db:
+            with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=0)) as db:
                 deadline = time.monotonic() + 0.01
                 db.set_progress_handler(lambda: time.monotonic() > deadline, 100)
                 if db.execute("SELECT 1 FROM background_tasks WHERE status NOT IN "
@@ -146,6 +177,10 @@ def _idle_guard(sid):
     routes = sys.modules.get('api.routes')
     if routes:
         locks.append(routes._MANUAL_COMPRESSION_JOBS_LOCK)
+    registry = getattr(sys.modules.get('tools.process_registry'), 'process_registry', None)
+    process_lock = getattr(registry, '_lock', None)
+    if process_lock is not None:
+        locks.append(process_lock)
     with ExitStack() as stack:
         for lock in locks:
             if not lock.acquire(blocking=False):
@@ -210,6 +245,8 @@ def set_archive_metadata(sid, archived, *, now=None, days=None):
                 while chunk := source.read(64 * 1024): target.write(chunk)
                 target.flush()
                 os.fsync(target.fileno())
+            if days is not None and config.load_settings().get('auto_archive_days') != days:
+                return None
             with _idle_guard(sid) as idle:
                 if not idle or _signature(os.fstat(source.fileno())) != _signature(before): return None
                 if _signature(os.stat(name, dir_fd=dirfd, follow_symlinks=False)) != _signature(before): return None

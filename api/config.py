@@ -9914,6 +9914,7 @@ _SETTINGS_DEFAULTS = {
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": True,  # merge CLI/TUI/messaging sessions from state.db into the sidebar by default (#3988); established installs are grandfathered OFF by the load_settings backfill
+    "auto_archive_days": 0,  # installation-wide opt-in; 0 off, otherwise 1–3650 days
     "show_claude_code_sessions": True,  # allow filtering Claude Code rows without hiding other imported sources
     "show_cron_sessions": False,  # surface cron sessions in the sidebar (subordinate to show_cli_sessions)
     "show_webhook_sessions": False,  # surface webhook sessions in the sidebar (subordinate to show_cli_sessions)
@@ -10206,6 +10207,8 @@ def load_settings() -> dict:
         stored.get("theme") if _has_stored_appearance else settings.get("theme"),
         stored.get("skin") if _has_stored_appearance else settings.get("skin"),
     )
+    days = settings.get("auto_archive_days", 0)
+    settings["auto_archive_days"] = days if type(days) is int and 0 <= days <= 3650 else 0
     settings["default_model"] = get_effective_default_model()
     try:
         model_cfg = get_config().get("model", {})
@@ -10385,6 +10388,10 @@ def _coerce_provider_cost_budget(value: Any) -> float | None:
 
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
+    if "auto_archive_days" in settings:
+        days = settings["auto_archive_days"]
+        if type(days) is not int or not 0 <= days <= 3650:
+            raise ValueError("auto_archive_days must be an integer from 0 to 3650 (0 disables)")
     raw_settings = _read_raw_settings_file()
     persisted_speech_keys = _extract_persisted_speech_keys(raw_settings)
     current = load_settings()
