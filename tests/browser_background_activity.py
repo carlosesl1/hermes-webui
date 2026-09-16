@@ -152,7 +152,7 @@ def main():
                         # Load complete rows for the explicit virtualizer exercise;
                         # normal session-open remains the bounded server preview.
                         page.evaluate('''async sid => {
-                          const r=await fetch('/api/session?session_id='+sid+'&messages=1&content_full=1');
+                          const r=await fetch('/api/session?session_id='+sid+'&messages=1');
                           if(!r.ok) throw new Error('Full fixture failed '+r.status);
                           const d=await r.json(); S.messages=d.session.messages;
                           window._virtualizeTranscript=true; renderMessages();

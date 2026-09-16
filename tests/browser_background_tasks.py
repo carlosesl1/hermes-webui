@@ -11,7 +11,7 @@ import subprocess
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-source = (subprocess.check_output(["git", "show", "9698a2ecaaa0b171dd0c573319e7908d46f0e477:static/messages.js"], cwd=ROOT).decode()
+source = (subprocess.check_output(["git", "show", os.environ.get("BACKGROUND_BASELINE_REF", "c052aa934eccab5ba142cb9795d1c9162fd70e1a") + ":static/messages.js"], cwd=ROOT).decode()
           if os.environ.get("BG_BASELINE") else (ROOT / "static/messages.js").read_text())
 source = source.split("// ── /background task tracking", 1)[1]
 source = source[source.index("\n"):].split("// ── Panel navigation", 1)[0]

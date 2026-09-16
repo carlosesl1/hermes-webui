@@ -1,7 +1,8 @@
 # Paginated render text budgets
 
 `api/render_payload.py` owns a read-only display projection, not canonical
-transcript storage, export data, or model context. `content_full=1` bypasses it.
+transcript storage, export data, or model context. Explicit unwindowed
+`messages=1` reads (without `msg_limit`) bypass it.
 No routes or full-content response semantics change in this fix.
 
 ## Contract change
@@ -17,8 +18,8 @@ reasoning, tool arguments/results and scenes. Short prose is satisfied first;
 remaining capacity is divided across larger rows, then across their text blocks.
 The existing per-field (8192; tool 4096), per-row (32768) and shared page (262144)
 limits remain. Budgets count retained data-bearing characters, not IDs or JSON
-structure. There is no structural-JSON or row-count cap. Giant opaque metadata
-strings retain the existing omission guard, now represented by empty strings.
+structure. There is no structural-JSON or row-count cap. Identity and non-text
+metadata remain unchanged, as in the public baseline.
 
 Clipping never appends instructions or strips a magic string from source text.
 A user who actually typed the old notice retains that text subject to the same
@@ -36,12 +37,12 @@ coordinates are preserved; the input is not mutated.
 ## Verification
 
 Focused tests: `tests/test_render_payload_preview_budget.py`,
-`tests/test_session_tail_payload.py`, `tests/test_local_large_session_safety.py`.
+`tests/test_session_tail_payload.py`, `tests/test_bounded_full_content.py`.
 The new regressions reproduce notice-only late turns on the old implementation.
 They cover early huge tools/scenes, many huge assistant turns, nested mixed
 content blocks, zero budgets, row/field/shared-page accounting, source identity,
 input immutability and a literal human-pasted notice. Existing route tests cover
-explicit lossless full-content retrieval and canonical compression isolation.
+explicit lossless full-content retrieval and canonical transcript isolation.
 
 Use the repository test runner in a development checkout. Where dependencies
 already exist and installs are prohibited, an isolated runner may reuse that

@@ -18,7 +18,7 @@ def verify_content_preview(browser,context,width,height,output):
  sid=r.json()['session']['session_id'];page=context.new_page();errors=[]
  page.on('pageerror',lambda e:errors.append(str(e)))
  def full():
-  r=context.request.get('/api/session?session_id='+sid+'&messages=1&resolve_model=0&content_full=1');assert r.ok;return r.json()['session']['messages']
+  r=context.request.get('/api/session?session_id='+sid+'&messages=1&resolve_model=0');assert r.ok;return r.json()['session']['messages']
  def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
  before=digest(full());result={'session_id':sid,'viewport':[width,height],'synthetic':True}
  try:

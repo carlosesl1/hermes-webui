@@ -63,6 +63,6 @@ python tests/browser_background_tasks.py
 
 It requires an already installed Playwright/Chromium environment.
 `BACKGROUND_ARTIFACT_DIR` optionally saves desktop, narrow, and mobile evidence.
-`BG_BASELINE=1` proves the compact-history regression against baseline `9698a2e`;
+`BG_BASELINE=1` proves the compact-history regression against public baseline `c052aa9` (override with `BACKGROUND_BASELINE_REF`);
 it is expected to fail after saving the before screenshots.
 This is component browser coverage, not a live-provider end-to-end test.
