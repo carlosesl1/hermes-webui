@@ -9,15 +9,26 @@ model-context messages, or authorization.
 
 ## User-facing behavior
 
-- A trusted `process_wakeup` notification and the assistant continuation it
-  causes appear inside a collapsed **Execution activity** disclosure.
-- Consecutive updates for the same human turn share one disclosure. The preceding
-  main answer stays outside it, as does the next human question and its answer.
-- Expanding reveals original commands, output, tool activity and assistant
-  results. No answer is deleted, rewritten or classified as "unimportant" by a
-  prose-matching heuristic. Failure status remains visible in the summary.
-- Live updates use the same group; approvals/clarifications and focused content
-  must remain reachable. Expansion survives ordinary redraws in the tab. Reload
+**Intentional presentation contract correction:** formerly a wakeup also owned
+all subsequent assistant continuations until the next human turn. Ownership now
+covers only the trusted notification itself. This prevents collapsing the
+principal deliverable, without guessing which assistant text is useful.
+
+- Only trusted `process_wakeup` notifications appear inside collapsed
+  **Execution activity** disclosures. Principal assistant prose, progress and
+  final answers always remain outside, live and settled, including after reload.
+- Consecutive notifications for the same human turn share a disclosure only
+  within an uninterrupted rendered segment. Every nonmember transcript row
+  (including a visible assistant answer) is a hard ordering boundary, as is a
+  virtual spacer. Later notifications never move ahead of that answer.
+- Expanding reveals the original notification commands/output and provenance.
+  No canonical message is deleted, rewritten or classified as "unimportant" by
+  a prose-matching heuristic. Failure status remains visible in the summary.
+- Legacy delegation/terminal wakeups use this same notification-only projection;
+  joined delegation tool results use the ordinary assistant/tool renderer, not
+  synthetic user turns. This frontend change does not alter producer delivery.
+- Approvals/clarifications and focused content must remain reachable. Expansion
+  survives ordinary redraws in the tab. Reload
   restores the transcript with groups collapsed by default.
 - Only explicit `process_wakeup` provenance classifies a notification. Legacy
   source-less messages stay visible as ordinary messages, even when their text
@@ -51,7 +62,9 @@ oversized event travels alone without truncation. A stable digest of IDs and
 payloads is the retry identity. Busy/credential-paused admission, transient
 server errors and dispatch exceptions retain the entire batch for a later
 turn/recovery hook, without introducing a timer retry loop. This does not promise that a model will never produce an acknowledgement;
-the browser grouping is deterministic and does not depend on model compliance.
+notification grouping is deterministic and does not depend on model compliance.
+Any assistant acknowledgement remains ordinary visible assistant content; the
+frontend must not hide it to simulate a single synthesis.
 
 A queued retry with a server-generated `wakeup-batch-` identity is indivisible:
 it is dispatched unchanged and is never combined with overflow, another batch,

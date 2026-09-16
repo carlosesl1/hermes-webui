@@ -1,4 +1,4 @@
-/* Background continuations are transcript-owned activity, not human questions.
+/* Trusted background notifications are activity, never principal assistant prose.
  * This module is a display projection only: never mutate messages, roles, source,
  * provider context or delivery acknowledgements. Canonical indices stay intact.
  */
@@ -30,16 +30,17 @@ function backgroundActivityDescriptor(message){
 }
 function backgroundActivityOwners(messages){
   const owners=new Map();
-  let human=-1,active=null;
+  let human=-1;
   (messages||[]).forEach((message,index)=>{
     if(!message) return;
     if(message.role==='user'){
       // Anthropic tool results aren't new human turns either.
       if(Array.isArray(message.content)&&message.content.length&&message.content.every(p=>p&&p.type==='tool_result')) return;
       const descriptor=backgroundActivityDescriptor(message);
-      if(descriptor){active={owner:human,eventIndex:index,...descriptor};owners.set(index,active);}
-      else {human=index;active=null;}
-    }else if(active){owners.set(index,{...active,eventIndex:null});}
+      if(descriptor) owners.set(index,{owner:human,eventIndex:index,...descriptor});
+      else human=index;
+    }
+    // Ownership is notification-only, never inherited by assistant/tool rows.
   });
   return owners;
 }
@@ -112,10 +113,15 @@ function syncBackgroundActivity(inner){
       if(row.matches('.message-virtual-spacer')){windowIndex++;continue;}
       if(!row.matches('.msg-row,.assistant-turn')) continue;
       const indexed=row.hasAttribute('data-msg-idx')?row:row.querySelector('[data-msg-idx]');
-      let raw=indexed?Number(indexed.dataset.msgIdx):NaN;
-      if(!Number.isInteger(raw)&&row.matches('#liveAssistantTurn,[data-live-assistant="1"]')) raw=messages.length-1;
-      const entry=owners.get(raw);
+      const raw=indexed?Number(indexed.dataset.msgIdx):NaN;
+      // A live shell may not yet have a canonical assistant index. Never borrow
+      // the last notification's identity to classify it as background activity.
+      const assistant=row.matches('.assistant-turn,#liveAssistantTurn,[data-live-assistant="1"],[data-role="assistant"]');
+      const entry=assistant?null:owners.get(raw);
       if(!entry){
+        // A visible nonmember is a semantic boundary just like a spacer: later
+        // notifications must not be pulled before the principal answer.
+        windowIndex++;
         const prior=row.closest('.background-activity-group');
         if(prior&&prior.parentElement===inner) inner.insertBefore(row,prior);
         continue;

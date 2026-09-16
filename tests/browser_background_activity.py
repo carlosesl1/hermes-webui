@@ -67,6 +67,8 @@ def main():
                         page.on('pageerror', lambda error, sink=errors: sink.append(str(error)))
                         page.goto('/', wait_until='domcontentloaded')
                         page.wait_for_function("() => typeof loadSession==='function'")
+                        source_url = page.locator('script[src*="background_activity.js"]').get_attribute('src')
+                        assert context.request.get(source_url).text() == (ROOT/'static/background_activity.js').read_text()
                         sid = page.evaluate("""async messages => {
                           const r=await fetch('/api/session/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'Background activity regression',messages})});
                           if(!r.ok) throw new Error('Import failed '+r.status);
@@ -77,30 +79,32 @@ def main():
                         except Exception:
                             page.screenshot(path=str(output/f'{width}-before-or-failure.png'), full_page=True)
                             raise
-                        assert page.locator('.background-activity-group').count() == 1
+                        assert page.locator('.background-activity-group').count() == 4
                         assert page.locator('.background-activity-group[open]').count() == 0
                         assert page.locator('#msgInner > [data-role="user"]').count() == 2
                         assert page.get_by_text('Revisão concluída. O relatório principal permanece aqui.', exact=True).is_visible()
                         assert page.get_by_text('Esta resposta pertence à nova pergunta.', exact=True).is_visible()
-                        assert not page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
+                        assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
                         assert page.locator('.background-activity-group.has-failure').count() == 1
                         page.screenshot(path=str(output/f'{width}-collapsed.png'), full_page=True)
-                        page.locator('.background-activity-summary').focus()
+                        page.locator('.background-activity-summary').first.focus()
                         page.keyboard.press('Enter')
                         page.wait_for_selector('.background-activity-group[open]')
                         assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
                         page.evaluate('renderMessages({preserveScroll:true})')
-                        assert page.locator('.background-activity-group[open]').count() == 1
+                        assert page.locator('.background-activity-group[open]').count() == 4
                         page.screenshot(path=str(output/f'{width}-expanded.png'), full_page=True)
-                        page.locator('.background-activity-summary').click()
+                        page.locator('.background-activity-summary').first.click()
                         page.reload(wait_until='domcontentloaded')
                         page.wait_for_selector('.background-activity-group')
                         assert page.locator('.background-activity-group[open]').count() == 0
                         assert page.get_by_text('Revisão concluída. O relatório principal permanece aqui.', exact=True).is_visible()
+                        assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
+                        assert page.locator('.background-activity-group .assistant-turn').count() == 0
                         # Persistence read-back is independent of the display projection.
                         stored = context.request.get(f'/api/session?session_id={sid}&messages=1').json()
                         actual = stored.get('session', stored).get('messages', [])
-                        assert any('Conclusão complementar' in str(m.get('content')) for m in actual)
+                        assert [(m['role'], m['content'], m.get('_source')) for m in actual] == [(m['role'], m['content'], m.get('_source')) for m in messages()]
                         geometry = page.evaluate('({width:innerWidth,scrollWidth:document.documentElement.scrollWidth,groups:document.querySelectorAll(".background-activity-group").length})')
                         assert geometry['scrollWidth'] <= width + (16 if width == 1440 else 0)
                         # Exercise the real paginated API and full-content button,
@@ -158,7 +162,7 @@ def main():
                         assert page.locator('#msgInner > .process-wakeup-row').count() == 0
                         assert page.locator('.background-activity-group[open]').count() == 0
                         assert page.get_by_text('Esta resposta pertence à nova pergunta.', exact=True).is_visible()
-                        assert not page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
+                        assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
                         page.locator('.background-activity-summary').last.click()
                         page.wait_for_function('''() => [...document.querySelectorAll('.background-activity-group')].some(g=>g.open)''')
                         assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
