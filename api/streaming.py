@@ -10284,7 +10284,8 @@ def _run_agent_streaming(
 
             _AIAgent = _get_ai_agent()
             if _AIAgent is not None:
-                from api.turn_delegation import turn_owned_agent_class
+                from api.turn_delegation import configure_joined_delegation_runtime, turn_owned_agent_class
+                configure_joined_delegation_runtime()
                 _AIAgent = turn_owned_agent_class(_AIAgent)
             if _AIAgent is None:
                 raise ImportError(_aiagent_import_error_detail())

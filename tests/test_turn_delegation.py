@@ -8,7 +8,22 @@ import types
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from api.turn_delegation import joined_tool_schemas, turn_owned_agent_class
+from api.turn_delegation import configure_joined_delegation_runtime, joined_tool_schemas, turn_owned_agent_class
+
+
+def test_webui_process_deadline_default_without_shared_config_mutation():
+    env = {}
+    configure_joined_delegation_runtime(env)
+    assert env == {'DELEGATION_CHILD_TIMEOUT_SECONDS': '1800'}
+    configure_joined_delegation_runtime(env)
+    assert env['DELEGATION_CHILD_TIMEOUT_SECONDS'] == '1800'
+
+
+@pytest.mark.parametrize('explicit', ['600', '3600', '0'])
+def test_explicit_delegation_deadline_is_respected(explicit):
+    env = {'DELEGATION_CHILD_TIMEOUT_SECONDS': explicit}
+    configure_joined_delegation_runtime(env)
+    assert env['DELEGATION_CHILD_TIMEOUT_SECONDS'] == explicit
 
 SCHEMA = [{'type':'function','function':{'name':'delegate_task','description':
     'Old background transport. END YOUR TURN. USE FOR: work. RULES: verify self-reports.',

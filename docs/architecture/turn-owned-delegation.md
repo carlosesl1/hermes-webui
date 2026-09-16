@@ -32,8 +32,13 @@ semantics must not be advertised as supported there.
 that signal and the run's existing cancel/writeback ownership guards apply.
 Physical cancellation of arbitrary network calls, shell side effects or daemons
 is not guaranteed. There is no durable child-resume claim across server restart.
-Hermes owns child timeouts and iteration limits; this adapter does not replace
-those with a hidden global timeout or mutate shared runtime settings.
+Hermes owns child timeouts, interruption and deferred cleanup. Before constructing
+agents, the WebUI sets a process-local fallback of 1800 seconds per child using
+the native `DELEGATION_CHILD_TIMEOUT_SECONDS` environment knob. Explicit environment
+values or profile `delegation.child_timeout_seconds` take precedence (including
+intentional disabling). This does not edit the shared configuration or other
+service processes. A timeout is a failure outcome, never evidence of hard thread
+termination; already-issued external writes cannot be undone by cancellation.
 
 Explicit `/background`, cron and terminal jobs stay detached and do not enter the
 delegation join. Existing notification delivery/recovery continues to handle those

@@ -7,6 +7,19 @@ completion queue. Explicit /background and terminal notifications are unrelated.
 """
 from copy import deepcopy
 from functools import lru_cache
+import os
+
+
+def configure_joined_delegation_runtime(environ=None):
+    """Set a WebUI-process fallback using the core's native child deadline knob.
+
+    Called before the WebUI constructs agents, never flipped around concurrent
+    calls. Explicit environment or per-profile delegation config wins; no shared
+    config file, runtime module, or other service process is modified. Core owns
+    timeout outcomes, interrupt propagation, and deferred child cleanup.
+    """
+    env = os.environ if environ is None else environ
+    env.setdefault('DELEGATION_CHILD_TIMEOUT_SECONDS', '1800')
 
 _JOINED_HEAD = (
     "Spawn subagents in isolated contexts; only their final summaries return to you. "
