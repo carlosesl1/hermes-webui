@@ -6,9 +6,12 @@ limits, operational scripts, credentials, or deployment artifacts.
 
 ## Locally repeated on the public integration tree
 
-- Repository `scripts/test.sh`: **229 passed** across 20 selected files, covering
+- Repository `scripts/test.sh`: **335 passed** across 34 selected files, covering
   turn-owned delegation, source preservation, previews/full content, sidebar
-  covering indexes, lineage, read-only reads and gateway reconciliation.
+  covering indexes, lineage, read-only reads, gateway reconciliation and locales.
+- Canonical English fallback verifies string copy plus the counted history function
+  in every locale, including 0/1/3, absent/null/localized overrides and mutation
+  guards. Locale parity still rejects unrelated missing or mistyped translations.
 - `scripts/ruff_lint.py --diff origin/master`: no new violations.
 - `tests/browser_background_tasks.py`: successful completed-history behavior,
   0/1/many records, keyboard/full output, active/failure visibility, repeated
