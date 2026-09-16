@@ -27,6 +27,9 @@ NEW_COPY_FALLBACK_KEYS = {
     "bg_status_cancelled",
     "bg_status_unknown",
     "bg_task_running",
+    "bg_history",
+    "message_preview_expand",
+    "message_preview_loading",
     "composer_description_steer",
     "composer_description_queue",
     "composer_description_interrupt",
@@ -38,7 +41,13 @@ NEW_COPY_FALLBACK_KEYS = {
 }
 
 
-@pytest.mark.parametrize("mutation", ["none", "missing_english", "broken_fallback"])
+CALLABLE_FALLBACK_KEYS = {"bg_history"}
+
+
+@pytest.mark.parametrize("mutation", [
+    "none", "missing_english", "broken_fallback", "missing_callable",
+    "bad_callable", "broken_callable_dispatch",
+])
 def test_new_copy_resolves_through_real_locale_fallback(mutation):
     """Exercise all locales; mutations prove missing English/fallback still fail."""
     node = shutil.which("node")
@@ -52,32 +61,55 @@ def test_new_copy_resolves_through_real_locale_fallback(mutation):
         source = source.replace("_locale[key] ?? LOCALES.en[key]", "_locale[key]")
     if mutation == "missing_english":
         source += "\ndelete LOCALES.en.history_preview_notice;\n"
+    if mutation == "missing_callable":
+        source += "\ndelete LOCALES.en.bg_history;\n"
+    if mutation == "bad_callable":
+        source += "\nLOCALES.en.bg_history = () => 'Background activity · 0 completed';\n"
+    if mutation == "broken_callable_dispatch":
+        assert "return val(...args)" in source
+        source = source.replace("return val(...args)", "return val()")
     checks = """
 const assert = require('node:assert/strict');
+const callableKeys = new Set(inputCallableKeys);
+assert.ok([...callableKeys].every(key => keys.includes(key)));
+const render = (value, args) => typeof value === 'function' ? value(...args) : value;
 for (const key of keys) {
-  assert.equal(typeof LOCALES.en[key], 'string', `English copy missing: ${key}`);
-  assert.ok(LOCALES.en[key].trim(), `Empty English copy: ${key}`);
+  const kind = callableKeys.has(key) ? 'function' : 'string';
+  assert.equal(typeof LOCALES.en[key], kind, `English copy missing: ${key}`);
+  if (kind === 'string') assert.ok(LOCALES.en[key].trim(), `Empty English copy: ${key}`);
+}
+for (const count of [0, 1, 3]) {
+  assert.equal(LOCALES.en.bg_history(count), `Background activity · ${count} completed`,
+    `English callable behavior: bg_history(${count})`);
 }
 for (const lang of Object.keys(LOCALES)) {
   setLocale(lang);
   for (const key of keys) {
+    const callable = callableKeys.has(key);
+    for (const args of callable ? [[0], [1], [3]] : [[]]) {
     const locale = LOCALES[lang];
-    const expected = locale[key] ?? LOCALES.en[key];
-    assert.equal(t(key), expected, `${lang}: ${key}`);
-    assert.notEqual(t(key), key, `${lang}: untranslated key ${key}`);
+    const value = locale[key] ?? LOCALES.en[key];
+    assert.equal(typeof value, callable ? 'function' : 'string', `${lang}: type ${key}`);
+    const expected = render(value, args);
+    assert.equal(typeof expected, 'string', `${lang}: result type ${key}`);
+    assert.ok(expected.trim(), `${lang}: empty ${key}`);
+    assert.equal(t(key, ...args), expected, `${lang}: ${key}(${args})`);
+    assert.notEqual(t(key, ...args), key, `${lang}: untranslated key ${key}`);
     if (lang === 'en') continue;
     const hadOwn = Object.hasOwn(locale, key);
     const saved = locale[key];
     try {
       delete locale[key];
-      assert.equal(t(key), LOCALES.en[key], `${lang}: absent ${key}`);
+      assert.equal(t(key, ...args), render(LOCALES.en[key], args), `${lang}: absent ${key}`);
       locale[key] = null;
-      assert.equal(t(key), LOCALES.en[key], `${lang}: null ${key}`);
-      locale[key] = 'Localized override';
-      assert.equal(t(key), 'Localized override', `${lang}: override ${key}`);
+      assert.equal(t(key, ...args), render(LOCALES.en[key], args), `${lang}: null ${key}`);
+      locale[key] = callable ? count => `Localized override ${count}` : 'Localized override';
+      const override = callable ? `Localized override ${args[0]}` : 'Localized override';
+      assert.equal(t(key, ...args), override, `${lang}: override ${key}`);
     } finally {
       if (hadOwn) locale[key] = saved;
       else delete locale[key];
+    }
     }
   }
   assert.equal(t('__unknown_locale_test_key__'), '__unknown_locale_test_key__');
@@ -89,13 +121,18 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 vm.runInNewContext(input.source + '\\n' + input.checks, {
   require,
   keys: input.keys,
+  inputCallableKeys: input.callableKeys,
   document: { documentElement: {} },
   localStorage: { setItem() {} },
 });
 """
     result = subprocess.run(
         [node, "-e", harness],
-        input=json.dumps({"source": source, "checks": checks, "keys": sorted(NEW_COPY_FALLBACK_KEYS)}),
+        input=json.dumps({
+            "source": source, "checks": checks,
+            "keys": sorted(NEW_COPY_FALLBACK_KEYS),
+            "callableKeys": sorted(CALLABLE_FALLBACK_KEYS),
+        }),
         text=True,
         capture_output=True,
         timeout=15,
