@@ -1345,8 +1345,12 @@ function _applyUserRowIntrinsicHeight(row, rawText){
   const h=Math.max(remembered, estimate);
   if(h>0) row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
 }
-function _measureMessageVirtualRow(inner, entry){
+function _measureMessageVirtualRow(inner, entry, renderedEntries){
   if(!inner||!entry) return 0;
+  if(typeof backgroundActivityVirtualHeight==='function'){
+    const activityHeight=backgroundActivityVirtualHeight(inner,entry,renderedEntries);
+    if(activityHeight!==null) return activityHeight;
+  }
   const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
   if(!primary) return 0;
   let totalHeight=Math.max(0, primary.getBoundingClientRect().height||0);
@@ -1380,11 +1384,14 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     const entry=renderVisWithIdx[vi];
     if(!entry) continue;
-    const totalHeight=_measureMessageVirtualRow(inner, entry);
+    const totalHeight=_measureMessageVirtualRow(inner, entry, renderVisWithIdx);
     if(totalHeight<=0) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
-    if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
+    const previous=Number(_messageVirtualHeightCache[visibleIdx]);
+    // A collapsed disclosure may allocate less than one pixel per canonical row.
+    // Initialize those entries too, or role estimates leave phantom spacer gaps.
+    if(!(previous>0)||Math.abs(previous-totalHeight)>1){
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
     }
@@ -17341,7 +17348,8 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const previewHtml = typeof messageContentPreviewHtml==='function' ? messageContentPreviewHtml(m) : '';
+    const footHtml = `${previewHtml}<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;

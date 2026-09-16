@@ -9338,9 +9338,30 @@ function _renderBackgroundTasks(owner){
     panel.style.paddingTop='0';
     inner.after(panel);
   }
-  // Keyed rows preserve native disclosure/focus during polling.
+  // Successful work is history, not a new footer row on every response/reload.
+  // Only authoritative status selects this presentation; prompts/results remain
+  // literal and the durable ledger and conversation are never modified here.
+  const completed=owner.tasks.filter(task=>task.status==='done');
+  let history=panel.querySelector('.background-history');
+  if(completed.length&&!history){
+    history=document.createElement('details');
+    history.className='background-history';
+    const summary=document.createElement('summary');
+    summary.style.cssText='cursor:pointer;padding:8px 0;color:var(--text-muted);font-size:12px;overflow-wrap:anywhere';
+    history.appendChild(summary);
+    panel.appendChild(history);
+  }
+  if(history){
+    const title=t('bg_history',completed.length);
+    if(history.firstElementChild.textContent!==title) history.firstElementChild.textContent=title;
+  }
+  // Keyed rows preserve native disclosure/focus during polling, including when
+  // a running task settles and moves into the on-demand history disclosure.
+  const rows=new Map(Array.from(panel.querySelectorAll('.background-task')).map(row=>[row.dataset.taskId,row]));
+  const taskIds=new Set(owner.tasks.map(task=>task.task_id));
+  for(const [id,row] of rows){if(!taskIds.has(id)) row.remove();}
   for(const task of owner.tasks){
-    let row=Array.from(panel.children).find(el=>el.dataset.taskId===task.task_id);
+    let row=rows.get(task.task_id);
     if(!row){
       row=document.createElement('details');
       row.className='background-task';
@@ -9351,7 +9372,11 @@ function _renderBackgroundTasks(owner){
       body.className='msg-body';
       body.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;min-width:0';
       row.append(summary,body);
-      panel.appendChild(row);
+    }
+    const target=task.status==='done'?history:panel;
+    if(row.parentNode!==target){
+      if(target===panel&&history) panel.insertBefore(row,history);
+      else target.appendChild(row);
     }
     const statuses=['running','done','error','no_response','interrupted','cancelled'];
     const name=String(task.prompt||t('bg_task'));
@@ -9363,6 +9388,7 @@ function _renderBackgroundTasks(owner){
     const output=name+'\n\n'+(task.answer||task.error||(task.status==='running'?t('bg_task_running'):t('bg_no_answer')));
     if(body.textContent!==output) body.textContent=output;
   }
+  if(history&&!completed.length) history.remove();
 }
 function startBackgroundPolling(parentSid, taskId, prompt){
   // A POST/poll that finishes after navigation must never adopt the new pane.

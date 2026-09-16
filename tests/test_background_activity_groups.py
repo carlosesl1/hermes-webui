@@ -56,7 +56,8 @@ console.log(JSON.stringify({entries:[...owners.entries()],unchanged:before===JSO
 """)
     owners = dict(result['entries'])
     assert 0 not in owners and 1 not in owners
-    assert owners[2]['owner'] == owners[3]['owner'] == owners[4]['owner'] == owners[5]['owner']
+    assert owners[2]['owner'] == owners[4]['owner']
+    assert 3 not in owners and 5 not in owners
     assert 6 not in owners and 7 not in owners
     assert owners[8]['owner'] != owners[2]['owner']
     assert result['unchanged']
@@ -73,3 +74,22 @@ console.log(JSON.stringify({
     assert result['unknown']['kind'] == 'notification'
     assert result['error']['failed'] is True
     assert result['indeterminate']['failed'] is False
+
+
+@pytest.mark.parametrize('content', ['Final report with artifact link', 'Done', '', [{'type': 'text', 'text': 'Principal synthesis'}]])
+def test_principal_assistant_and_tools_never_inherit_notification_ownership(content):
+    result = probe("""
+const content=CONTENT;
+const messages=[{role:'user',content:'Build'},
+ {role:'user',_source:'process_wakeup',content:'Legacy terminal event'},
+ {role:'assistant',_source:'process_wakeup',content},
+ {role:'tool',content:'joined result'},
+ {role:'user',content:[{type:'tool_result',content:'joined result'}]},
+ {role:'assistant',content:'Final answer'},
+ {role:'user',_source:'process_wakeup',content:'Later notification'}];
+const before=JSON.stringify(messages);
+console.log(JSON.stringify({entries:[...backgroundActivityOwners(messages)],unchanged:before===JSON.stringify(messages)}));
+""".replace('CONTENT', json.dumps(content)))
+    assert [index for index, _ in result['entries']] == [1, 6]
+    assert {entry['owner'] for _, entry in result['entries']} == {0}
+    assert result['unchanged']

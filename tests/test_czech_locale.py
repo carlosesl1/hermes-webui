@@ -2,7 +2,7 @@ from collections import Counter
 from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
-from tests.test_locale_english_fallback import NEW_COPY_FALLBACK_KEYS
+from tests.test_locale_english_fallback import CALLABLE_FALLBACK_KEYS, NEW_COPY_FALLBACK_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -154,9 +154,10 @@ def test_czech_locale_arrow_function_values_mirror_english():
                 out.add(k)
         return out
 
-    # Every key whose English value is a function must also be a function in cs
-    # (either an arrow or a named _i18n* helper reference).
-    assert callable_values(en_block) == callable_values(cs_block)
+    # Only explicitly allowed, absent callable keys may use English fallback.
+    # A present translation must still be callable; unrelated omissions fail.
+    fallback = CALLABLE_FALLBACK_KEYS - set(locale_keys(src, "cs"))
+    assert callable_values(en_block) - fallback == callable_values(cs_block)
 
 
 def test_czech_locale_preserves_placeholder_patterns():

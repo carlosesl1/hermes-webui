@@ -50,6 +50,42 @@ def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> 
         return sqlite3.connect(str(db_path))
 
 
+def message_stats_table(conn, *, has_timestamp: bool) -> str:
+    """Prefer an existing complete covering index for sidebar COUNT/MAX reads.
+
+    Cost estimates can select (session_id, id), forcing reads of large message
+    payload pages to obtain timestamps despite an existing covering index. Only
+    inspect the current schema: no index/statistics writes, cache, or stale data.
+    Older schemas, partial/expression indexes and inspection failures keep the
+    original unhinted query. Names are schema-owned but still quoted as SQL
+    identifiers (not interpolated as raw SQL).
+    """
+    required = {'session_id', 'timestamp'} if has_timestamp else {'session_id'}
+    try:
+        cur = conn.cursor()
+        cur.execute('PRAGMA index_list(messages)')
+        indexes = cur.fetchall()
+        candidates = []
+        for index in indexes:
+            if len(index) < 5 or index[4]:  # partial indexes exclude valid rows
+                continue
+            name = str(index[1])
+            quoted = '"' + name.replace('"', '""') + '"'
+            cur.execute(f'PRAGMA index_xinfo({quoted})')
+            keys = [row for row in cur.fetchall() if len(row) >= 6 and row[5]]
+            if not keys or keys[0][2] != 'session_id':
+                continue
+            if any(row[1] < 0 or str(row[4]).upper() != 'BINARY' for row in keys):
+                continue
+            if required.issubset({row[2] for row in keys}):
+                candidates.append((len(keys), name, quoted))
+        if candidates:
+            return 'messages INDEXED BY ' + min(candidates)[2]
+    except sqlite3.Error:
+        pass
+    return 'messages'
+
+
 MESSAGING_SOURCES = {
     'discord',
     'email',
@@ -1126,6 +1162,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             use_messages_query = has_messages_table and messages_has_session_id
             row_ids = list(rows)
             if use_messages_query:
+                stats_table = message_stats_table(conn, has_timestamp=messages_has_timestamp)
                 last_at_expr = "MAX(timestamp) AS last_message_at" if messages_has_timestamp else "NULL AS last_message_at"
                 for i in range(0, len(row_ids), IN_CHUNK):
                     chunk = row_ids[i:i + IN_CHUNK]
@@ -1133,7 +1170,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     cur.execute(
                         f"""
                         SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
-                        FROM messages
+                        FROM {stats_table}
                         WHERE session_id IN ({placeholders})
                         GROUP BY session_id
                         """,

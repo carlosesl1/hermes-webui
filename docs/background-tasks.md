@@ -1,10 +1,17 @@
 # Durable `/background` tasks
 
 `/background <prompt>` runs a separate task under the current parent session.
-The result appears in a collapsed **Background task** disclosure below that
-session's conversation. Expand it for the full plain-text output. It does not
-append an assistant message, rewrite the parent session, or enter parent model
-context. `/btw` remains ephemeral and is not covered by this store.
+Successful results appear under one collapsed **Background activity · N completed**
+history entry below the session's conversation, not individual completed footer
+rows on each response or reload. Expand the history, then a task, for its full
+literal prompt and plain-text output. Running tasks and non-success outcomes
+(failed, interrupted, cancelled, no-answer, or unknown) remain individually visible
+and inspectable. Only the authoritative task status selects this presentation;
+no prompt matching, dismissal, deletion, or result acknowledgement is involved.
+The history starts collapsed on reload/navigation and preserves explicit disclosure
+state during polling. It does not append an assistant message, rewrite the parent
+session, or enter parent model context. `/btw` remains ephemeral and is not covered
+by this store.
 
 ## State and delivery contract
 
@@ -56,5 +63,6 @@ python tests/browser_background_tasks.py
 
 It requires an already installed Playwright/Chromium environment.
 `BACKGROUND_ARTIFACT_DIR` optionally saves desktop, narrow, and mobile evidence.
-`BG_BASELINE=1` exercises the original regression against baseline `94fd2da`.
+`BG_BASELINE=1` proves the compact-history regression against public baseline `c052aa9` (override with `BACKGROUND_BASELINE_REF`);
+it is expected to fail after saving the before screenshots.
 This is component browser coverage, not a live-provider end-to-end test.

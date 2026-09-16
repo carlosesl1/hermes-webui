@@ -2,7 +2,7 @@ from collections import Counter
 from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
-from tests.test_locale_english_fallback import NEW_COPY_FALLBACK_KEYS
+from tests.test_locale_english_fallback import CALLABLE_FALLBACK_KEYS, NEW_COPY_FALLBACK_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -169,7 +169,9 @@ def test_polish_locale_arrow_function_values_mirror_english():
     def arrows(block):
         return {k for k, v in value_re.findall(block) if arrow_re.match(v)}
 
-    assert arrows(pl_block) == arrows(en_block)
+    # Exempt only absent canonical callables, never mistyped translations.
+    fallback = CALLABLE_FALLBACK_KEYS - set(locale_keys(src, "pl"))
+    assert arrows(pl_block) == arrows(en_block) - fallback
 
 
 def test_polish_locale_preserves_placeholder_patterns():

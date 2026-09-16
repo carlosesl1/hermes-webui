@@ -1985,6 +1985,14 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             result_messages[_checkpoint_idx] = retained_checkpoint
         else:
             _mark_active_turn_checkpoint(existing_checkpoint, identity)
+            # Core echoes do not carry WebUI provenance. Alignment below
+            # adopts this token-owned context row as the display checkpoint,
+            # so the later display merge skips its normal source stamp.
+            # Stamp only the exact resolved current-turn row, never its text
+            # lookalikes or historical messages.
+            stamp_message_source(
+                existing_checkpoint, identity.get('source') or source or 'webui',
+            )
         return result_messages
     previous_context = list(previous_context or [])
     if _messages_have_prefix(result_messages, previous_context):
@@ -10275,6 +10283,10 @@ def _run_agent_streaming(
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
 
             _AIAgent = _get_ai_agent()
+            if _AIAgent is not None:
+                from api.turn_delegation import configure_joined_delegation_runtime, turn_owned_agent_class
+                configure_joined_delegation_runtime()
+                _AIAgent = turn_owned_agent_class(_AIAgent)
             if _AIAgent is None:
                 raise ImportError(_aiagent_import_error_detail())
 

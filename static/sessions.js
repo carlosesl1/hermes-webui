@@ -3846,6 +3846,9 @@ async function _ensureAllMessagesLoaded(force = false) {
     || (S.session?.tool_calls || []).some(tc => tc && tc._content_truncated);
   if (!S.session || !needsFullContent()) return;
   const requestedSid = S.session.session_id;
+  const loadGeneration = _loadSessionGeneration;
+  const ownsNavigation = () => S.session?.session_id === requestedSid
+    && _loadSessionGeneration === loadGeneration;
   if (_loadingOlder) {
     // A prefetch is mid-flight (between the `_loadingOlder = true` line
     // and its post-await guards). Bumping the generation token now
@@ -3855,10 +3858,10 @@ async function _ensureAllMessagesLoaded(force = false) {
     // history ourselves. The generation bump below ensures any other
     // future race against this same continuation also fails closed.
     _bumpMessagesGeneration();
-    while (_loadingOlder) {
+    while (_loadingOlder && ownsNavigation()) {
       await new Promise(resolve => setTimeout(resolve, 16));
     }
-    if (!S.session || S.session.session_id !== requestedSid || !needsFullContent()) return;
+    if (!ownsNavigation() || !needsFullContent()) return;
   }
   _loadingOlder = true;
   try {
@@ -3866,9 +3869,9 @@ async function _ensureAllMessagesLoaded(force = false) {
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
-    // Session may have been switched while we awaited. Bail rather than
-    // overwrite the new session's messages.
-    if (!S.session || S.session.session_id !== sid) return;
+    // Session identity alone cannot distinguish A -> B -> A navigation.
+    // A response from an older visit must never replace the newer snapshot.
+    if (!ownsNavigation()) return;
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
     const msgs = (data.session.messages || []).filter(m => m && m.role);
     // Bump the generation BEFORE the wholesale replace so any racing
@@ -3896,16 +3899,60 @@ async function _ensureAllMessagesLoaded(force = false) {
       }
     }
   } finally {
-    _loadingOlder = false;
+    // loadSession resets this lock; an older visit cannot unlock its successor.
+    if (_loadSessionGeneration === loadGeneration) _loadingOlder = false;
+  }
+}
+
+// Only transport metadata may expose this action; a human can quote any notice.
+function messageContentPreviewHtml(message){
+  if(!message?._content_truncated || message._preview_content_truncated===false) return '';
+  const sid=S.session?.session_id;
+  if(!sid) return '';
+  return `<button type="button" class="message-preview-expand" data-session-id="${esc(sid)}" onclick="expandMessagePreview(this)" style="display:inline-flex;align-items:center;min-height:32px;margin-top:6px;padding:4px 0;border:0;background:transparent;color:var(--accent);font:inherit;font-size:12px;text-decoration:underline;text-underline-offset:3px;cursor:pointer">${esc(t('message_preview_expand'))}</button>`;
+}
+
+async function expandMessagePreview(button){
+  const sid=button.dataset.sessionId;
+  const loadGeneration=_loadSessionGeneration;
+  if(!sid || S.session?.session_id!==sid || button.disabled) return;
+  const row=button.closest('[data-session-msg-idx]');
+  const index=row?.dataset.sessionMsgIdx;
+  button.disabled=true;button.setAttribute('aria-busy','true');
+  button.textContent=t('message_preview_loading');
+  try{
+    await expandFullTranscript();
+    if(S.session?.session_id===sid && _loadSessionGeneration===loadGeneration && /^\d+$/.test(index||'')){
+      const target=$('msgInner')?.querySelector(`[data-session-msg-idx="${index}"]`);
+      if(target){target.setAttribute('tabindex','-1');target.focus({preventScroll:true});}
+    }
+  }catch(error){
+    if(S.session?.session_id===sid && _loadSessionGeneration===loadGeneration) showToast(t('history_preview_error'));
+  }finally{
+    button.disabled=false;button.removeAttribute('aria-busy');
+    button.textContent=t('message_preview_expand');
   }
 }
 
 // Explicit opt-in: the potentially large full transcript is never fetched by
 // background polling. The renderer can bind its preview disclosure to this.
+const _fullTranscriptLoads=new Map();
 async function expandFullTranscript() {
   const sid = S.session?.session_id;
-  await _ensureAllMessagesLoaded(true);
-  if (S.session?.session_id === sid) renderMessages({ preserveScroll: true });
+  if(!sid) return;
+  const loadGeneration = _loadSessionGeneration;
+  const key = JSON.stringify([sid,loadGeneration]);
+  if(_fullTranscriptLoads.has(key)) return _fullTranscriptLoads.get(key);
+  const loading=(async()=>{
+    await _ensureAllMessagesLoaded(true);
+    if (S.session?.session_id === sid && _loadSessionGeneration === loadGeneration) {
+      if((S.messages||[]).some(m=>m?._content_truncated)) throw new Error('Incomplete transcript response');
+      renderMessages({ preserveScroll: true });
+    }
+  })();
+  _fullTranscriptLoads.set(key,loading);
+  try{return await loading;}
+  finally{if(_fullTranscriptLoads.get(key)===loading) _fullTranscriptLoads.delete(key);}
 }
 
 function syncFullTranscriptPreview(){
@@ -3928,10 +3975,12 @@ function syncFullTranscriptPreview(){
     button.style.cssText='align-self:flex-start;min-height:32px;padding:5px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font:inherit;cursor:pointer';
     button.onclick=async()=>{
       if(S.session?.session_id!==sid) return;
+      const loadGeneration=_loadSessionGeneration;
+      const ownsNavigation=()=>S.session?.session_id===sid && _loadSessionGeneration===loadGeneration;
       button.disabled=true;
       try{await expandFullTranscript();}
-      catch(error){if(S.session?.session_id===sid) showToast(t('history_preview_error'));}
-      finally{button.disabled=false;syncFullTranscriptPreview();}
+      catch(error){if(ownsNavigation()) showToast(t('history_preview_error'));}
+      finally{button.disabled=false;if(ownsNavigation()) syncFullTranscriptPreview();}
     };
     notice.append(label,button);inner.before(notice);
   }

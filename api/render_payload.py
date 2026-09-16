@@ -22,30 +22,67 @@ TEXT_KEYS = frozenset({
     'arguments', 'input', 'output', 'result', 'snippet', 'summary',
     'detail', 'description', 'preview', 'command',
 })
-NOTICE = '\n\n[Content truncated in paginated preview; open the full transcript to inspect the complete content.]'
-TOOL_NOTICE = '\n\n[Tool output truncated in paginated preview; open the full transcript to inspect the complete result.]'
+
+
+def _fair_shares(demands, available):
+    """Max-min allocation: satisfy short text first, split the rest fairly."""
+    shares = [0] * len(demands)
+    available = max(0, available)
+    for left, index in enumerate(sorted(range(len(demands)), key=demands.__getitem__)):
+        share = min(demands[index], available // (len(demands) - left))
+        shares[index] = share
+        available -= share
+    return shares
+
+
+def _conversation_text(message):
+    """Schema-selected visible prose; never infer provenance from magic text."""
+    if not isinstance(message, dict) or message.get('role') not in ('user', 'assistant'):
+        return {}
+    content = message.get('content')
+    if isinstance(content, str):
+        return {('content',): content}
+    if isinstance(content, list):
+        return {('content', i, 'text'): block['text']
+                for i, block in enumerate(content)
+                if isinstance(block, dict)
+                and block.get('type') in ('text', 'input_text', 'output_text')
+                and isinstance(block.get('text'), str)}
+    return {}
 
 
 def bounded_render_messages(messages, *, page_budget=None):
-    """Copy and clip text recursively, including hydrated scenes and tool args.
+    """Copy render data, reserving fair shares for readable conversation first.
 
-    No JSON serialization of the original giant value is needed to clip it.
-    Arrays/dictionaries retain their type, order, IDs and numeric coordinates.
-    A shared page budget may also cover session-level legacy tool summaries.
+    Field, row and shared page budgets count retained data-bearing characters.
+    Arrays/dictionaries retain order, IDs and coordinates. Clipping is metadata,
+    not appended text. This projection must never replace canonical/model data.
     """
+    messages = list(messages or [])
     budget = page_budget if page_budget is not None else [PAGE_CHARS]
+    prose = [_conversation_text(message) for message in messages]
+    demands = [min(ROW_CHARS, sum(min(len(text), FIELD_CHARS) for text in leaves.values()))
+               for leaves in prose]
+    row_shares = _fair_shares(demands, budget[0])
+    # Reserve every row's prose before any tool/scene/reasoning can spend it.
+    budget[0] -= sum(row_shares)
     result = []
-    for message in messages or []:
+    for index, message in enumerate(messages):
         if not isinstance(message, dict):
             result.append(message)
             continue
-        remaining = [ROW_CHARS]
-        clipped = [False]
-        notice = TOOL_NOTICE if message.get('role') == 'tool' else NOTICE
+        leaves = prose[index]
+        shares = _fair_shares([min(len(text), FIELD_CHARS) for text in leaves.values()], row_shares[index])
+        reserved = {path: text[:share] for (path, text), share in zip(leaves.items(), shares, strict=True)}
+        prose_clipped = any(len(reserved[path]) < len(text) for path, text in leaves.items())
+        remaining = [ROW_CHARS - row_shares[index]]
+        clipped = [prose_clipped]
         field_limit = 4096 if message.get('role') == 'tool' else FIELD_CHARS
 
-        def visit(value, key='', text_payload=False, *, field_limit=field_limit,
-                  remaining=remaining, clipped=clipped, notice=notice):
+        def visit(value, key='', text_payload=False, path=(), *, field_limit=field_limit,
+                  remaining=remaining, clipped=clipped, reserved=reserved):
+            if path in reserved:
+                return reserved[path]
             if isinstance(value, str):
                 if key in IDENTITY_KEYS or not text_payload:
                     return value
@@ -53,19 +90,21 @@ def bounded_render_messages(messages, *, page_budget=None):
                 kept = min(len(value), limit)
                 remaining[0] -= kept
                 budget[0] -= kept
-                if kept == len(value):
-                    return value
-                clipped[0] = True
-                return value[:kept] + notice
+                if kept < len(value):
+                    clipped[0] = True
+                return value[:kept]
             if isinstance(value, list):
-                return [visit(part, text_payload=text_payload) for part in value]
+                return [visit(part, text_payload=text_payload, path=path + (i,))
+                        for i, part in enumerate(value)]
             if isinstance(value, dict):
-                return {key: visit(part, key, text_payload or key in TEXT_KEYS) for key, part in value.items()}
+                return {key: visit(part, key, text_payload or key in TEXT_KEYS, path + (key,))
+                        for key, part in value.items()}
             return value
 
         preview = visit(message)
         if clipped[0]:
             preview['_content_truncated'] = True
+            preview['_preview_content_truncated'] = prose_clipped
             if isinstance(message.get('content'), str):
                 preview['_content_original_chars'] = len(message['content'])
         result.append(preview)

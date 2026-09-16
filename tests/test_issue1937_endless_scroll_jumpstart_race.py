@@ -169,7 +169,7 @@ def test_ensure_all_yields_when_prefetch_in_flight():
     """When a prefetch holds the mutex, ensure-all must wait, not wholesale-replace alongside it."""
     body = _function_body(SESSIONS_JS, "_ensureAllMessagesLoaded")
     # Look for the yield-loop on _loadingOlder before the mutex claim.
-    yield_idx = body.index("while (_loadingOlder)")
+    yield_idx = body.index("while (_loadingOlder && ownsNavigation())")
     claim_idx = body.index("_loadingOlder = true;")
     assert yield_idx < claim_idx, (
         "_ensureAllMessagesLoaded must yield (poll _loadingOlder) BEFORE "
@@ -185,7 +185,7 @@ def test_ensure_all_bumps_generation_during_wait_phase():
     # Find the _loadingOlder branch that runs when a prefetch is in flight,
     # and verify it bumps the generation before the wait loop.
     branch_idx = body.index("if (_loadingOlder) {")
-    wait_idx = body.index("while (_loadingOlder)", branch_idx)
+    wait_idx = body.index("while (_loadingOlder && ownsNavigation())", branch_idx)
     bump_in_branch = body.index("_bumpMessagesGeneration()", branch_idx)
     assert branch_idx < bump_in_branch < wait_idx, (
         "When a prefetch is in flight at entry, _ensureAllMessagesLoaded "
@@ -210,7 +210,7 @@ def test_ensure_all_guards_against_session_switch_mid_await():
     import re
     body = _function_body(SESSIONS_JS, "_ensureAllMessagesLoaded")
     await_idx = body.index("await api(")
-    sid_check_idx = body.index("S.session.session_id !== sid", await_idx)
+    sid_check_idx = body.index("if (!ownsNavigation()) return;", await_idx)
     # #3306 renamed the replace RHS from `msgs` to `_msgsToAssign` (carry-forward);
     # match by LHS so the ordering invariant survives the rename.
     m = re.search(r"S\.messages\s*=\s*\w+;", body[await_idx:])

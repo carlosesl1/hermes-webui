@@ -40,6 +40,7 @@ from api.agent_sessions import (
     _is_continuation_session,
     is_cli_session_row,
     normalize_agent_session_source,
+    message_stats_table,
     open_state_db_readonly,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
@@ -6005,6 +6006,7 @@ def _read_state_db_sidebar_overrides(
                 messages_has_timestamp = 'timestamp' in message_cols
                 messages_has_title_fields = {'session_id', 'role', 'content', 'timestamp'}.issubset(message_cols)
 
+            stats_table = message_stats_table(conn, has_timestamp=messages_has_timestamp)
             delegated_title_ids: set[str] = set()
             for i in range(0, len(ids), chunk_size):
                 chunk = ids[i:i + chunk_size]
@@ -6053,7 +6055,7 @@ def _read_state_db_sidebar_overrides(
                     cur.execute(
                         f"""
                         SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
-                        FROM messages
+                        FROM {stats_table}
                         WHERE session_id IN ({count_placeholders})
                         GROUP BY session_id
                         """,

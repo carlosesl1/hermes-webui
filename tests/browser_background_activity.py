@@ -54,6 +54,12 @@ def main():
                 try:
                     from browser_background_live import verify_live_projection
                     verify_live_projection(browser)
+                    from browser_background_geometry import verify_geometry
+                    verify_geometry(browser)
+                    from browser_preview_controls import verify_preview_controls
+                    verify_preview_controls(browser)
+                    from browser_preview_navigation import verify_preview_navigation
+                    verify_preview_navigation(browser)
                     for width, height in [(1440, 900), (522, 1232), (390, 844)]:
                         context = browser.new_context(base_url=base, viewport={'width': width, 'height': height})
                         page = context.new_page()
@@ -61,6 +67,8 @@ def main():
                         page.on('pageerror', lambda error, sink=errors: sink.append(str(error)))
                         page.goto('/', wait_until='domcontentloaded')
                         page.wait_for_function("() => typeof loadSession==='function'")
+                        source_url = page.locator('script[src*="background_activity.js"]').get_attribute('src')
+                        assert context.request.get(source_url).text() == (ROOT/'static/background_activity.js').read_text()
                         sid = page.evaluate("""async messages => {
                           const r=await fetch('/api/session/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'Background activity regression',messages})});
                           if(!r.ok) throw new Error('Import failed '+r.status);
@@ -71,30 +79,32 @@ def main():
                         except Exception:
                             page.screenshot(path=str(output/f'{width}-before-or-failure.png'), full_page=True)
                             raise
-                        assert page.locator('.background-activity-group').count() == 1
+                        assert page.locator('.background-activity-group').count() == 4
                         assert page.locator('.background-activity-group[open]').count() == 0
                         assert page.locator('#msgInner > [data-role="user"]').count() == 2
                         assert page.get_by_text('Revisão concluída. O relatório principal permanece aqui.', exact=True).is_visible()
                         assert page.get_by_text('Esta resposta pertence à nova pergunta.', exact=True).is_visible()
-                        assert not page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
+                        assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
                         assert page.locator('.background-activity-group.has-failure').count() == 1
                         page.screenshot(path=str(output/f'{width}-collapsed.png'), full_page=True)
-                        page.locator('.background-activity-summary').focus()
+                        page.locator('.background-activity-summary').first.focus()
                         page.keyboard.press('Enter')
                         page.wait_for_selector('.background-activity-group[open]')
                         assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
                         page.evaluate('renderMessages({preserveScroll:true})')
-                        assert page.locator('.background-activity-group[open]').count() == 1
+                        assert page.locator('.background-activity-group[open]').count() == 4
                         page.screenshot(path=str(output/f'{width}-expanded.png'), full_page=True)
-                        page.locator('.background-activity-summary').click()
+                        page.locator('.background-activity-summary').first.click()
                         page.reload(wait_until='domcontentloaded')
                         page.wait_for_selector('.background-activity-group')
                         assert page.locator('.background-activity-group[open]').count() == 0
                         assert page.get_by_text('Revisão concluída. O relatório principal permanece aqui.', exact=True).is_visible()
+                        assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
+                        assert page.locator('.background-activity-group .assistant-turn').count() == 0
                         # Persistence read-back is independent of the display projection.
                         stored = context.request.get(f'/api/session?session_id={sid}&messages=1').json()
                         actual = stored.get('session', stored).get('messages', [])
-                        assert any('Conclusão complementar' in str(m.get('content')) for m in actual)
+                        assert [(m['role'], m['content'], m.get('_source')) for m in actual] == [(m['role'], m['content'], m.get('_source')) for m in messages()]
                         geometry = page.evaluate('({width:innerWidth,scrollWidth:document.documentElement.scrollWidth,groups:document.querySelectorAll(".background-activity-group").length})')
                         assert geometry['scrollWidth'] <= width + (16 if width == 1440 else 0)
                         # Exercise the real paginated API and full-content button,
@@ -110,8 +120,14 @@ def main():
                         rect=page.locator('#fullTranscriptPreview button').bounding_box()
                         assert rect and 0 <= rect['y'] < height, 'full-content action must stay reachable while scrolled'
                         page.screenshot(path=str(output/f'{width}-full-content-preview.png'), full_page=True)
-                        page.locator('#fullTranscriptPreview button').click()
+                        # The row itself must offer full text, not require finding
+                        # a global toolbar elsewhere in a long conversation.
+                        inline = page.locator('#msgInner .message-preview-expand')
+                        assert inline.count() == 1
+                        inline.focus()
+                        inline.press('Enter')
                         page.wait_for_function('() => !S.messages.some(m=>m._content_truncated)')
+                        assert page.locator('#msgInner .message-preview-expand').count() == 0
                         assert page.locator('#fullTranscriptPreview').count() == 0
                         assert page.evaluate('S.messages[S.messages.length-1].content') == complete
                         persisted = context.request.get(f'/api/session?session_id={full_sid}&messages=1').json()
@@ -120,8 +136,45 @@ def main():
                         page.evaluate("S.session.tool_calls=[{_content_truncated:true}];syncFullTranscriptPreview()")
                         assert page.locator('#fullTranscriptPreview button').is_visible()
                         page.evaluate('S.session.tool_calls=[];syncFullTranscriptPreview()')
+                        # Long histories use the same quiet activity model. The
+                        # spacer remains a hard boundary, never a reason to expose
+                        # automatic notifications as fresh conversational bubbles.
+                        long_rows = []
+                        for index in range(180):
+                            long_rows.extend([{'role': 'user', 'content': f'History question {index}'},
+                                              {'role': 'assistant', 'content': f'History answer {index}'}])
+                        long_rows.extend(messages())
+                        long_sid = page.evaluate('''async rows => {
+                          const r=await fetch('/api/session/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'Virtual background activity regression',messages:rows})});
+                          if(!r.ok) throw new Error('Import failed '+r.status);
+                          const d=await r.json();await loadSession(d.session.session_id);return d.session.session_id;
+                        }''', long_rows)
+                        # Load complete rows for the explicit virtualizer exercise;
+                        # normal session-open remains the bounded server preview.
+                        page.evaluate('''async sid => {
+                          const r=await fetch('/api/session?session_id='+sid+'&messages=1');
+                          if(!r.ok) throw new Error('Full fixture failed '+r.status);
+                          const d=await r.json(); S.messages=d.session.messages;
+                          window._virtualizeTranscript=true; renderMessages();
+                        }''', long_sid)
+                        page.wait_for_selector('.message-virtual-spacer', state='attached')
+                        page.wait_for_selector('.background-activity-group')
+                        assert page.locator('#msgInner > .process-wakeup-row').count() == 0
+                        assert page.locator('.background-activity-group[open]').count() == 0
+                        assert page.get_by_text('Esta resposta pertence à nova pergunta.', exact=True).is_visible()
+                        assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
+                        page.locator('.background-activity-summary').last.click()
+                        page.wait_for_function('''() => [...document.querySelectorAll('.background-activity-group')].some(g=>g.open)''')
+                        assert page.get_by_text('Conclusão complementar dos subagentes.', exact=True).is_visible()
+                        page.screenshot(path=str(output/f'{width}-virtualized-activity.png'), full_page=True)
+                        assert page.evaluate('document.documentElement.scrollWidth') <= width
                         assert not errors, errors
-                        results.append({'viewport': [width, height], 'session': sid, 'geometry': geometry, 'errors': errors, 'full_content_button': True, 'passed': True})
+                        # Release this page's SSE connections before opening the
+                        # next case on the local HTTP/1.1 server (six per origin).
+                        page.close()
+                        from browser_content_preview import verify_content_preview
+                        preview_result = verify_content_preview(browser, context, width, height, output/'prose-preview')
+                        results.append({'viewport': [width, height], 'session': sid, 'geometry': geometry, 'errors': errors, 'full_content_button': True, 'preview_readability': preview_result, 'passed': True})
                         context.close()
                 finally:
                     browser.close()
