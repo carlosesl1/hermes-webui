@@ -22,6 +22,16 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
     monkeypatch.setattr(config, "SESSIONS", {})
     monkeypatch.setattr(models, "SESSIONS", config.SESSIONS)
+    # Full CI shards import unrelated run/process fixtures first. Give these
+    # runtime-guard tests their own registries, not whatever another test left.
+    for name in ("ACTIVE_RUNS", "STREAMS", "SESSION_WRITEBACK_OWNERS",
+                 "PROCESS_SESSION_INDEX", "DEFERRED_PROCESS_WAKEUPS",
+                 "PENDING_BG_TASK_COMPLETIONS", "PENDING_GOAL_CONTINUATION"):
+        monkeypatch.setattr(config, name, {})
+    from api import background, routes
+    monkeypatch.setattr(background, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(background, "_BTW_TRACKING", {})
+    monkeypatch.setattr(routes, "_MANUAL_COMPRESSION_JOBS", {})
     monkeypatch.setattr(config, "load_settings", lambda: {"auto_archive_days": 1})
     monkeypatch.setattr(aa, "_runtime_idle", lambda sid: True)
     monkeypatch.setattr(aa, "_publish", Mock())

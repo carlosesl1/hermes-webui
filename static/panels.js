@@ -9080,7 +9080,7 @@ async function saveAutoArchiveSetting() {
   select.disabled = days.disabled = $('settingsAutoArchiveSave').disabled = true;
   _autoArchiveStatus('auto_archive_saving');
   try {
-    await api('/api/settings', {method:'POST', body:JSON.stringify({auto_archive_days:value}), retries:0});
+    await _enqueueSettingsPost({method:'POST', body:JSON.stringify({auto_archive_days:value}), retries:0});
     const saved = await api('/api/settings');
     if (saved.auto_archive_days !== value) throw new Error('Auto-archive readback mismatch');
     _autoArchiveStatus('auto_archive_saved');
