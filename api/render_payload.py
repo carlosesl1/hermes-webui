@@ -155,7 +155,7 @@ def bounded_settlement_session(session, *, tool_calls=None):
     ], page_budget=budget, settlement=True)
     attach_todo_state(raw, raw['messages'])
     full_url = '/api/session?' + urlencode({
-        'session_id': session.session_id, 'messages': 1, 'resolve_model': 0,
+        'session_id': session.session_id, 'messages': 1, 'resolve_model': 0, 'content_full': 1,
     })
     raw['_full_content_url'] = full_url
     for row in raw['messages'] + raw['tool_calls']:
