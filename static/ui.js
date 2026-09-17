@@ -10024,7 +10024,8 @@ function dismissReconnect() {
 const SYSTEM_HEALTH_INTERVAL_MS=5000;
 let _systemHealthTimer=null;
 function _systemHealthPercent(metric){
-  const percent=Number(metric&&metric.percent);
+  if(!metric||metric.available===false||metric.percent==null||metric.percent==='') return null;
+  const percent=Number(metric.percent);
   if(!Number.isFinite(percent)) return null;
   return Math.max(0,Math.min(100,Math.round(percent*10)/10));
 }
@@ -10033,17 +10034,19 @@ function _formatSystemHealthPercent(percent){
   return `${percent.toFixed(percent%1?1:0)}%`;
 }
 function _formatSystemHealthBytes(metric){
-  if(!metric||!metric.used_bytes||!metric.total_bytes) return '';
+  if(!metric||metric.available===false||metric.used_bytes==null||metric.total_bytes==null) return '';
+  if(![metric.used_bytes,metric.total_bytes].every(value=>Number.isFinite(Number(value))&&Number(value)>=0)) return '';
   const units=['B','KB','MB','GB','TB'];
   const fmt=(bytes)=>{
     let value=Number(bytes)||0, idx=0;
     while(value>=1024&&idx<units.length-1){value/=1024;idx++;}
     return `${value.toFixed(value>=10||idx===0?0:1)} ${units[idx]}`;
   };
-  return `${fmt(metric.used_bytes)} / ${fmt(metric.total_bytes)}`;
+  const free=metric.free_bytes;
+  const freeText=free!=null&&Number.isFinite(Number(free))&&Number(free)>=0?` · ${fmt(free)} free`:'';
+  return `${fmt(metric.used_bytes)} / ${fmt(metric.total_bytes)}${freeText}`;
 }
-function _updateSystemHealthMetric(name,metric){
-  const row=document.querySelector(`[data-system-health-metric="${name}"]`);
+function _updateSystemHealthMetric(name,metric,row=document.querySelector(`[data-system-health-metric="${name}"]`)){
   if(!row) return;
   const rawPercent=_systemHealthPercent(metric);
   const percent=rawPercent == null ? 0 : rawPercent;
@@ -10056,8 +10059,39 @@ function _updateSystemHealthMetric(name,metric){
     const bytes=(name==='memory'||name==='disk')?_formatSystemHealthBytes(metric):'';
     label.title=bytes||text;
   }
-  if(bar) bar.setAttribute('aria-valuenow',String(percent));
+  if(bar){
+    if(rawPercent==null) bar.removeAttribute('aria-valuenow');
+    else bar.setAttribute('aria-valuenow',String(percent));
+    bar.setAttribute('aria-valuetext',rawPercent==null?'Unavailable':text);
+  }
   if(fill) fill.style.width=`${percent}%`;
+}
+function _renderSystemHealthDisks(disks){
+  const grid=document.querySelector('#systemHealthPanel .system-health-metrics');
+  if(!grid) return;
+  grid.querySelectorAll('[data-system-health-disk]').forEach(row=>row.remove());
+  const seen=new Set();
+  (disks.length?disks:[null]).forEach(metric=>{
+    const device=String(metric?.device||'');
+    const mountpoint=String(metric?.mountpoint||metric?.path||'');
+    const key=device||mountpoint||'disk';
+    if(seen.has(key)) return;
+    seen.add(key);
+    const row=document.createElement('div');
+    row.className='system-health-metric';
+    row.setAttribute('data-system-health-disk','');
+    row.innerHTML='<div class="system-health-label"><span class="system-health-disk-name"></span><span class="system-health-value" data-system-health-value></span></div><div class="system-health-disk-mount"></div><div class="system-health-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="system-health-bar-fill"></div></div><div class="system-health-capacity"></div>';
+    const name=device.split('/').filter(Boolean).pop()||'Disk';
+    row.querySelector('.system-health-disk-name').textContent=name;
+    row.querySelector('.system-health-disk-name').title=device||name;
+    row.querySelector('.system-health-disk-mount').textContent=mountpoint;
+    row.querySelector('.system-health-bar').setAttribute('aria-label',`${name}${mountpoint?' at '+mountpoint:''} usage`);
+    _updateSystemHealthMetric('disk',metric,row);
+    const unavailable=_systemHealthPercent(metric)==null;
+    if(unavailable) row.querySelector('[data-system-health-value]').textContent='Unavailable';
+    row.querySelector('.system-health-capacity').textContent=unavailable?'':_formatSystemHealthBytes(metric);
+    grid.appendChild(row);
+  });
 }
 function setSystemHealthUnavailable(message){
   const panel=$('systemHealthPanel');
@@ -10066,7 +10100,8 @@ function setSystemHealthUnavailable(message){
   panel.classList.remove('loading');
   panel.classList.add('unavailable');
   if(status) status.textContent=message||'Unavailable';
-  ['cpu','memory','disk'].forEach(name=>_updateSystemHealthMetric(name,null));
+  ['cpu','memory'].forEach(name=>_updateSystemHealthMetric(name,null));
+  _renderSystemHealthDisks([]);
 }
 function renderSystemHealth(payload){
   const panel=$('systemHealthPanel');
@@ -10080,7 +10115,7 @@ function renderSystemHealth(payload){
   if(status) status.textContent=payload.status==='partial'?'Partial':'Live';
   _updateSystemHealthMetric('cpu',payload.cpu);
   _updateSystemHealthMetric('memory',payload.memory);
-  _updateSystemHealthMetric('disk',payload.disk);
+  _renderSystemHealthDisks(Array.isArray(payload.disks)&&payload.disks.length?payload.disks:[payload.disk]);
 }
 async function pollSystemHealth(){
   if(document.visibilityState !== 'visible') return;

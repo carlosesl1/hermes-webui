@@ -3,12 +3,14 @@
 The browser only needs coarse CPU/RAM/disk usage. Linux uses procfs first;
 platforms without procfs (for example macOS) fall back to psutil for aggregate
 CPU/RAM metrics. Keep the payload intentionally small: no process lists,
-command strings, user identities, environment variables, or filesystem topology
-leave the server.
+command strings, user identities, or environment variables leave the server.
+The authenticated panel also exposes device and mount labels for local mounted
+filesystems; bind mounts of the same filesystem are counted only once.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import time
 from importlib import import_module
@@ -153,6 +155,65 @@ def _disk_usage() -> dict[str, int | float]:
     }
 
 
+
+_PROC_MOUNTINFO = Path("/proc/self/mountinfo")
+
+
+def _unescape_mount(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value)
+
+
+def _disk_volumes() -> list[dict[str, Any]]:
+    """Local disk filesystems visible to this process, not container overlays.
+
+    Linux mountinfo gives a stable major:minor identity across bind aliases.
+    Prefer a filesystem-root mount, then the shallowest accessible bind. Do
+    not spawn host commands or traverse disks on each five-second panel poll.
+    """
+    groups: dict[str, list[tuple[str, str, str, str]]] = {}
+    try:
+        with _PROC_MOUNTINFO.open(encoding="utf-8") as handle:
+            for line in handle:
+                left, separator, right = line.partition(" - ")
+                fields, filesystem = left.split(), right.split()
+                if not separator or len(fields) < 5 or len(filesystem) < 2:
+                    continue
+                device = _unescape_mount(filesystem[1])
+                if not device.startswith("/dev/") or device.startswith(("/dev/loop", "/dev/ram")):
+                    continue
+                if filesystem[0] in {"tmpfs", "devtmpfs", "squashfs", "overlay", "autofs"}:
+                    continue
+                root, mount = _unescape_mount(fields[3]), _unescape_mount(fields[4])
+                try:
+                    if not Path(mount).is_dir():
+                        continue
+                except OSError:
+                    continue
+                groups.setdefault(fields[2], []).append((root, mount, device, filesystem[0]))
+    except FileNotFoundError:
+        # Other platforms keep the existing root-disk metric as a fallback.
+        return []
+    disks = []
+    for identity in sorted(groups):
+        candidates = sorted(groups[identity], key=lambda row: (row[0] != "/", len(row[0]), len(row[1]), row[1]))
+        _, mount, device, fs_type = candidates[0]
+        disk: dict[str, Any] = {"device": device, "mountpoint": mount, "fs_type": fs_type,
+                                "available": False, "percent": None}
+        for _, mount, device, fs_type in candidates:
+            try:
+                usage = shutil.disk_usage(mount)
+                if usage.total <= 0:
+                    continue
+            except OSError:
+                continue
+            disk.update(device=device, mountpoint=mount, fs_type=fs_type, available=True,
+                        used_bytes=int(usage.used), total_bytes=int(usage.total), free_bytes=int(usage.free),
+                        percent=_clamp_percent(usage.used / usage.total * 100))
+            break
+        disks.append(disk)
+    return disks
+
+
 def _safe_error(metric: str, exc: Exception) -> dict[str, str]:
     # Keep this intentionally coarse. Exception messages can contain local paths
     # on unusual platforms; the browser only needs a safe unavailable reason.
@@ -290,6 +351,12 @@ def build_system_health_payload() -> dict[str, Any]:
             errors.append(_safe_error(name, exc))
 
     try:
+        disks = _disk_volumes()
+    except Exception as exc:
+        disks = []
+        errors.append(_safe_error("disks", exc))
+
+    try:
         runtime = _webui_runtime_payload(errors)
     except Exception as exc:
         # Terminal fail-open: an unexpected failure in the runtime compositor
@@ -307,6 +374,7 @@ def build_system_health_payload() -> dict[str, Any]:
         "cpu": metrics["cpu"],
         "memory": metrics["memory"],
         "disk": metrics["disk"],
+        "disks": disks,
         "webui_runtime": runtime,
         "errors": errors,
     }
