@@ -1,6 +1,5 @@
 import io
 from types import SimpleNamespace
-from urllib.parse import urlparse
 from api import config, run_journal, streaming
 
 
@@ -38,4 +37,3 @@ def test_legacy_metering_rows_validate_but_do_not_replay(tmp_path, monkeypatch):
     body = handler.wfile.getvalue().decode()
     assert "event: metering" not in body
     assert "id: r:3" in body and "event: done" in body
-

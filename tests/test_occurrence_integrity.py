@@ -174,4 +174,3 @@ def test_sidecar_attachment_cannot_delete_contradictory_occurrence(field):
     merged = merge_session_messages_append_only([left], [right])
     assert len(merged) == 2
     assert [m[field] for m in merged] == [left[field], right[field]]
-

@@ -211,4 +211,3 @@ def test_synthetic_projection_benchmark(monkeypatch, request):
                "speedup": round(cold / warm, 2), "retained_charge_bytes": memo.bytes,
                "mapping_bytes": sys.getsizeof(memo.entries), "entries": len(memo.entries)}
     request.config.pluginmanager.getplugin("terminalreporter").write_line("REDACTION_BENCHMARK " + json.dumps(metrics))
-

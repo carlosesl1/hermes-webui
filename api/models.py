@@ -1553,7 +1553,7 @@ class Session:
                 f.flush()
                 os.fsync(f.fileno())
                 written_stat = os.fstat(f.fileno())
-            for attempt in range(3):
+            for _attempt in range(3):
                 signature = _save_file_identity(self.path)
                 existing_bytes = None
                 cached = getattr(self, '_saved_count_identity', None)

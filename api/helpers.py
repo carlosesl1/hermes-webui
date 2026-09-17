@@ -647,7 +647,7 @@ def _might_contain_sensitive_text(text: str) -> bool:
     global _prefilter_scope_rules, _prefilter_scope
     with _prefilter_scope_lock:
         if (_prefilter_scope_rules is None
-                or any(a is not b for a, b in zip(rules, _prefilter_scope_rules))):
+                or any(a is not b for a, b in zip(rules, _prefilter_scope_rules, strict=False))):
             _prefilter_scope_rules = rules
             _prefilter_scope = object()
         scope = _prefilter_scope

@@ -250,4 +250,3 @@ def test_authoritative_worker_workspace_wins_profile_default(homes, monkeypatch)
         assert config._thread_ctx.env["TERMINAL_CWD"] == "/selected-workspace"
         assert os.environ["TERMINAL_CWD"] == "/selected-workspace"
         assert config._thread_ctx.env["HERMES_SESSION_KEY"] == "s"
-
