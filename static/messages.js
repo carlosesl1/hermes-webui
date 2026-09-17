@@ -61,7 +61,7 @@ function _mergeSettlementWindow(previous, incoming, oldOffset=0, sameSession=tru
 
 // A long tool-only turn may leave a gap between the loaded range and done tail.
 // Fill only that gap with bounded cursor pages, never reload the whole history.
-async function _completeSettlementWindow(incoming, sid){
+function _completeSettlementWindow(incoming, sid){
   if(incoming?._settlement_window!=='tail_v1'||S.session?.session_id!==sid||incoming.session_id!==sid) return;
   const generation=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
   const ownerStream=S.activeStreamId;
@@ -69,19 +69,24 @@ async function _completeSettlementWindow(incoming, sid){
     && (generation===null||_loadSessionGeneration===generation);
   let before=Number(incoming._messages_offset)||0;
   const end=(typeof _oldestIdx==='number'?_oldestIdx:0)+(S.messages||[]).length;
-  const suffix=[];
-  const cards=[];
-  while(before>end){
-    const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=30&msg_boundary=1&msg_before=${before}`);
-    if(!stillOwned()) return;
-    const page=data?.session;
-    const start=Number(page?._messages_offset);
-    if((page?.session_id&&page.session_id!==sid)||!Number.isInteger(start)||start<0||start>=before||start+(page.messages||[]).length!==before) throw new Error('Incomplete settlement page');
-    suffix.unshift(...page.messages);
-    cards.unshift(...(page.tool_calls||[]).map(tc=>({...tc,assistant_msg_idx:tc.assistant_msg_idx+start})));
-    before=start;
-  }
-  if(suffix.length){incoming.messages=suffix.concat(incoming.messages);incoming.tool_calls=cards.concat(incoming.tool_calls||[]);incoming._messages_offset=before;}
+  // Return no promise unless hydration really needs I/O. Even awaiting an
+  // already-resolved promise would interrupt legacy done-event settlement.
+  if(before<=end) return;
+  return (async()=>{
+    const suffix=[];
+    const cards=[];
+    while(before>end){
+      const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=30&msg_boundary=1&msg_before=${before}`);
+      if(!stillOwned()) return;
+      const page=data?.session;
+      const start=Number(page?._messages_offset);
+      if((page?.session_id&&page.session_id!==sid)||!Number.isInteger(start)||start<0||start>=before||start+(page.messages||[]).length!==before) throw new Error('Incomplete settlement page');
+      suffix.unshift(...page.messages);
+      cards.unshift(...(page.tool_calls||[]).map(tc=>({...tc,assistant_msg_idx:tc.assistant_msg_idx+start})));
+      before=start;
+    }
+    if(suffix.length){incoming.messages=suffix.concat(incoming.messages);incoming.tool_calls=cards.concat(incoming.tool_calls||[]);incoming._messages_offset=before;}
+  })();
 }
 
 function _markSessionViewed(sid, messageCount) {
@@ -6214,7 +6219,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const _doneEvent=e;
       const _doneLoadGeneration=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
       const _finishDone=async()=>{
-        try{await _completeSettlementWindow(_doneData.session,activeSid);}
+        try{
+          const hydration=_completeSettlementWindow(_doneData.session,activeSid);
+          if(hydration) await hydration;
+        }
         catch(error){console.warn('Settlement gap needs explicit transcript reload',error);}
         if((_doneLoadGeneration!==null&&_loadSessionGeneration!==_doneLoadGeneration)
             || _bailOutOfTerminalEventsFromStaleStream(source)){

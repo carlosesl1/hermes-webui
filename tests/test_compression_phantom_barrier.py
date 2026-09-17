@@ -125,7 +125,7 @@ api = async () => ({});
 """
 
 _SCENARIO = r"""
-async ({kind, doneSid}) => {
+async ({kind, doneSid, bounded}) => {
   const activeSid = 'session-a';
   const streamId = 'stream-under-test';
   S.session = {session_id: activeSid, messages: []};
@@ -177,6 +177,7 @@ async ({kind, doneSid}) => {
   source.emit('done', {
     session: {
       session_id: doneSid,
+      ...(bounded ? {_settlement_window:'tail_v1',_messages_offset:0,message_count:1} : {}),
       messages: [{role: 'assistant', content: 'complete'}],
       tool_calls: [],
     },
@@ -209,7 +210,7 @@ def browser():
         instance.close()
 
 
-def _run(browser, kind: str, done_sid: str, *, mutated: bool = False) -> dict:
+def _run(browser, kind: str, done_sid: str, *, mutated: bool = False, bounded: bool = False) -> dict:
     page = browser.new_page()
     page.route(
         "**/*",
@@ -227,7 +228,7 @@ def _run(browser, kind: str, done_sid: str, *, mutated: bool = False) -> dict:
         page.add_script_tag(content=UI_JS)
         page.add_script_tag(content=MUTATED_MESSAGES_JS if mutated else MESSAGES_JS)
         page.evaluate(_STABILIZE_UNRELATED_UI)
-        return page.evaluate(_SCENARIO, {"kind": kind, "doneSid": done_sid})
+        return page.evaluate(_SCENARIO, {"kind": kind, "doneSid": done_sid, "bounded": bounded})
     finally:
         page.close()
 
@@ -256,8 +257,9 @@ def _assert_canonical_clear(result: dict, done_sid: str) -> None:
 
 
 @pytest.mark.parametrize("done_sid", ["session-a", "session-b"], ids=["A-to-A", "A-to-B"])
-def test_owned_running_state_is_cleared_through_real_sse_path(browser, done_sid):
-    result = _run(browser, "running", done_sid)
+@pytest.mark.parametrize("bounded", [False, True], ids=["legacy", "bounded-contiguous"])
+def test_owned_running_state_is_cleared_through_real_sse_path(browser, done_sid, bounded):
+    result = _run(browser, "running", done_sid, bounded=bounded)
     _assert_running_prerequisite(result)
     _assert_canonical_clear(result, done_sid)
 

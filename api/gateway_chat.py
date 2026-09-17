@@ -37,6 +37,9 @@ from api.config import (
 )
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session
+# Compatibility export for integrations that imported the old gateway merge seam.
+# Active writeback still uses the replay-aware streaming reconciler below.
+from api.models import merge_session_messages_append_only as merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 from api.tool_outcomes import tool_result_is_error
 

@@ -127,6 +127,12 @@ assert.equal(_mergeSettlementWindow(old,gap).messages,old);
 async function api(url){calls++;const before=Number(new URL(url,'http://local').searchParams.get('msg_before'));
  const start=Math.max(0,before-30);return {session:{_messages_offset:start,
  messages:Array.from({length:before-start},(_,i)=>({role:'assistant',content:'row '+(start+i)}))}};}
+// Legacy, rotated, contiguous and overlapping envelopes must not yield.
+assert.equal(_completeSettlementWindow({session_id:'s',messages:[]},'s'),undefined);
+assert.equal(_completeSettlementWindow(incoming,'s'),undefined);
+assert.equal(_completeSettlementWindow({...incoming,_messages_offset:100},'s'),undefined);
+assert.equal(_completeSettlementWindow({...incoming,session_id:'rotated'},'s'),undefined);
+assert.equal(calls,0);
 (async()=>{await _completeSettlementWindow(gap,'s');assert.equal(calls,2);
  assert.equal(gap._messages_offset,100);assert.equal(_mergeSettlementWindow(old,gap).messages.length,190);
  assert.equal(gap.messages.length,90);
