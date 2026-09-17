@@ -9213,6 +9213,38 @@ def _message_occurrence_key(message):
     return ('unidentified', id(message))
 
 
+def _cross_source_replay_match(target, source, *, allow_legacy=False):
+    """Pair rows from two ordered histories, never deduplicate a history by text.
+
+    Missing provenance can be tolerated for an explicitly aligned full-history
+    projection. Otherwise require a shared occurrence or exact timestamp. A
+    caller must consume each paired row once; timestamps alone are not IDs.
+    """
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return target == source
+    if not _message_private_identity_compatible(target, source):
+        return False
+    for field in ('_source', '_active_turn_token'):
+        if target.get(field) and source.get(field) and target[field] != source[field]:
+            return False
+    if _session_message_content_key(target) != _session_message_content_key(
+        source, normalize_workspace_prefix=True
+    ):
+        return False
+    if target.get('tool_calls') != source.get('tool_calls'):
+        return False
+    left = _message_occurrence_key(target)
+    if left == _message_occurrence_key(source):
+        return True
+    left_ts, left_valid = _message_exact_timestamp_details(target)
+    right_ts, right_valid = _message_exact_timestamp_details(source)
+    if not left_valid or not right_valid:
+        return False
+    if left_ts is not None and right_ts is not None:
+        return left_ts == right_ts
+    return allow_legacy
+
+
 def _message_private_identity_compatible(target: dict | None, source: dict | None) -> bool:
     """Return whether private identities do not contradict one another."""
     target_stable, target_stable_valid = _stable_message_identity_details(target)
@@ -9352,7 +9384,7 @@ def _copy_api_content_sidecar(target: dict | None, source: dict | None) -> bool:
     return False
 
 
-def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list) -> None:
+def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list, *, matches=None) -> None:
     """Attach state.db ``api_content`` to the matching sidecar transcript rows.
 
     Matching is intentionally stricter than visible transcript dedupe. A
@@ -9379,6 +9411,11 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
 
     used_targets: set[int] = set()
     used_sources: set[int] = set()
+
+    def _attach(target, source):
+        _copy_api_content_sidecar(target, source)
+        if matches is not None:
+            matches[id(source)] = target
 
     # Invalid provenance is never treated as absent metadata. Consume those
     # rows up front so no weaker tier can attach an arbitrary provider sidecar.
@@ -9461,7 +9498,7 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
             and target_api_content != source_api_content
         ):
             continue
-        _copy_api_content_sidecar(sidecar[target_index], state[source_index])
+        _attach(sidecar[target_index], state[source_index])
 
     # 2. Durable row identity. This path is unambiguous only when every
     # alias agrees, each row id occurs once on each side, and visible content
@@ -9534,7 +9571,7 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
             continue
         used_targets.add(target_index)
         used_sources.add(source_index)
-        _copy_api_content_sidecar(sidecar[target_index], state[source_index])
+        _attach(sidecar[target_index], state[source_index])
 
     # Any duplicate stable-id rows left unresolved by the authoritative row-id
     # tier are ambiguous and must not fall through to timestamps/content.
@@ -9611,7 +9648,7 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
                 continue
             used_sources.add(source_index)
             used_targets.add(target_index)
-            _copy_api_content_sidecar(sidecar[target_index], state[source_index])
+            _attach(sidecar[target_index], state[source_index])
 
     # 4. Same-second sub-second drift. The sidecar JSON and state.db can
     # record one logical turn with different fractional timestamps while still
@@ -9687,7 +9724,7 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
                 continue
             used_sources.add(source_index)
             used_targets.add(target_index)
-            _copy_api_content_sidecar(sidecar[target_index], state[source_index])
+            _attach(sidecar[target_index], state[source_index])
 
     # 5. Role + visible-content fallback tolerates mixed timestamp metadata,
     # but only when the candidate relationship is mutually unique. Repeated
@@ -9754,7 +9791,7 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
             continue
         used_targets.add(target_index)
         used_sources.add(source_index)
-        _copy_api_content_sidecar(sidecar[target_index], state[source_index])
+        _attach(sidecar[target_index], state[source_index])
 
 
 def _session_message_dedup_key(msg: dict):
@@ -10003,23 +10040,18 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
         and str(sidecar_context[0].get('role') or '') == 'user'
     )
 
-    sidecar_keys = [
-        (_session_message_content_key(m, normalize_workspace_prefix=False), _message_occurrence_key(m))
-        for m in sidecar_context
-    ]
-    state_keys = [
-        (_session_message_content_key(m, normalize_workspace_prefix=True), _message_occurrence_key(m))
-        for m in state_messages
-    ]
-    max_offset = min(len(sidecar_keys), len(state_keys))
+    max_offset = len(sidecar_context)
     best_len = 0
     best_offset = 0
     for offset in range(max_offset):
         length = 0
         while (
-            offset + length < len(sidecar_keys)
-            and length < len(state_keys)
-            and sidecar_keys[offset + length] == state_keys[length]
+            offset + length < len(sidecar_context)
+            and length < len(state_messages)
+            and _cross_source_replay_match(
+                sidecar_context[offset + length], state_messages[length],
+                allow_legacy=allow_single_row_prefix and offset == 0,
+            )
         ):
             length += 1
         if length > best_len:
@@ -10037,13 +10069,13 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     # order. This still tolerates stale state-only rows between mirrored context
     # rows, but once the sidecar context is exhausted every later state row is a
     # real delta, even if it repeats a short earlier message.
-    sidecar_index = best_len
+    sidecar_index = best_offset + best_len
     state_index = best_len
-    while sidecar_index < len(sidecar_keys) and state_index < len(state_keys):
-        if state_keys[state_index] == sidecar_keys[sidecar_index]:
+    while sidecar_index < len(sidecar_context) and state_index < len(state_messages):
+        if _cross_source_replay_match(sidecar_context[sidecar_index], state_messages[state_index]):
             sidecar_index += 1
         state_index += 1
-    if sidecar_index == len(sidecar_keys):
+    if sidecar_index == len(sidecar_context):
         return state_messages[state_index:]
     return state_messages[best_len:]
 
@@ -10254,7 +10286,8 @@ def merge_session_messages_append_only(
     """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
-    _reconcile_api_content_sidecars(sidecar_messages, state_messages)
+    reconciled_targets = {}
+    _reconcile_api_content_sidecars(sidecar_messages, state_messages, matches=reconciled_targets)
     # The reconciler's quarantine sets are invocation-local. Mirror the
     # identity-bucket guards here because this append-only merge has its own
     # row-id fast path that must not re-admit a row isolated above.
@@ -10527,6 +10560,7 @@ def merge_session_messages_append_only(
                 if len(identities) > 1:
                     ambiguous_state_multimodal_mirrors.add(mirror_key)
     state_replay_idx = 0
+    consumed_sidecar_ids = set()
     skipped_state_visible_counts = {}
     # Loop-invariant: a session whose original truncate cutoff (truncation_boundary)
     # is strictly below the watermark is genuinely ADVANCED (a new turn was
@@ -10574,17 +10608,30 @@ def merge_session_messages_append_only(
                 state_replay_idx += 1
             seen_dedup_keys.add(dedup_key)
             continue
+        while (state_replay_idx < len(sidecar_visible_messages)
+               and id(sidecar_visible_messages[state_replay_idx]) in consumed_sidecar_ids):
+            state_replay_idx += 1
+        reconciled_target = reconciled_targets.pop(id(msg), None)
+        if reconciled_target is not None:
+            # Reuse the reconciler's one-to-one decision, not another content
+            # search that could consume a different row after timestamp drift.
+            _merge_session_display_metadata(reconciled_target, msg)
+            consumed_sidecar_ids.add(id(reconciled_target))
+            if (state_replay_idx < len(sidecar_visible_messages)
+                    and sidecar_visible_messages[state_replay_idx] is reconciled_target):
+                state_replay_idx += 1
+            continue
         replays_sidecar_prefix = False
         replay_target = None
         if state_replay_idx < len(sidecar_visible_sequence):
-            expected_visible_key = sidecar_visible_sequence[state_replay_idx]
-            if visible_key == expected_visible_key or _has_visible_duplicate(
-                visible_key, {expected_visible_key}
+            if _cross_source_replay_match(
+                sidecar_visible_messages[state_replay_idx], msg
             ):
                 replays_sidecar_prefix = True
                 replay_target = sidecar_visible_messages[state_replay_idx]
                 state_replay_idx += 1
         if replays_sidecar_prefix:
+            consumed_sidecar_ids.add(id(replay_target))
             _merge_session_display_metadata(replay_target, msg)
             matched_visible_key = _matching_visible_duplicate(
                 visible_key,

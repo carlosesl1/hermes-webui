@@ -6307,13 +6307,25 @@ def _messages_have_prefix(messages, prefix, *, key_fn=None):
     if len(messages or []) < len(prefix or []):
         return False
     for idx, expected in enumerate(prefix or []):
-        if key_fn((messages or [])[idx]) != key_fn(expected):
+        actual = (messages or [])[idx]
+        if key_fn is _message_replay_key:
+            # These are aligned copies of the same full history, not a global
+            # seen-text set. Each position is consumed once. Runtime projection
+            # may strip row IDs/timestamps, but conflicting provenance is fatal.
+            from api.models import _cross_source_replay_match
+            if not _cross_source_replay_match(expected, actual, allow_legacy=True):
+                return False
+        elif key_fn(actual) != key_fn(expected):
             return False
     return True
 
 
 def _message_replay_key(msg):
-    """Return a stable comparison key for replay/overlap de-duplication."""
+    """Strict occurrence key for unpaired replay/global history de-duplication.
+
+    Full-history prefix alignment uses _cross_source_replay_match instead: a
+    projected copy can lack provenance, but equal text is not occurrence identity.
+    """
     from api.models import _message_occurrence_key
     identity = _message_identity(msg)
     if isinstance(msg, dict):

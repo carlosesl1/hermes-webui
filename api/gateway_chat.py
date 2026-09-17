@@ -36,7 +36,7 @@ from api.config import (
     update_active_run,
 )
 from api.helpers import _redact_text, redact_session_data
-from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
+from api.models import clear_process_wakeup_pause, get_session
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 from api.tool_outcomes import tool_result_is_error
 
@@ -1320,21 +1320,9 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
             s.context_messages = previous_context + [user_msg, assistant_msg]
-            try:
-                from api.streaming import _is_context_compression_marker
-
-                display_context = [
-                    msg
-                    for msg in previous_context
-                    if not _is_context_compression_marker(msg)
-                ]
-            except Exception:
-                logger.debug("Failed to filter gateway display context markers", exc_info=True)
-                display_context = previous_context
-            display = merge_session_messages_append_only(
-                previous_messages,
-                display_context,
-            )
+            # The display merger owns ordered, occurrence-preserving context
+            # backfill. Pre-appending context here destroys its gap boundaries.
+            display = previous_messages
             try:
                 from api.streaming import _merge_display_messages_after_agent_result
 

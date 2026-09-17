@@ -826,8 +826,8 @@ def test_issue6751_context_dedup_ignores_malformed_api_content():
     from api.streaming import _deduplicate_context_messages
 
     history = [
-        {"role": "user", "content": "same visible", "api_content": {"bad": True}},
-        {"role": "user", "content": "same visible"},
+        {"id": "same-record", "role": "user", "content": "same visible", "api_content": {"bad": True}},
+        {"id": "same-record", "role": "user", "content": "same visible"},
     ]
 
     assert _deduplicate_context_messages(history) == history[:1]
@@ -1011,6 +1011,7 @@ def test_issue6751_session_arc_fuzzy_replay_requires_equal_api_content():
     from api.streaming import _looks_like_replayed_session_arc_summary
 
     summary_a = {
+        "id": "same-summary",
         "role": "user",
         "content": "[Session Arc Summary]\n" + "same recovered context\n" * 260,
         "api_content": "wire-one",

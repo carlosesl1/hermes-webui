@@ -76,6 +76,8 @@ def test_real_callback_live_snapshot_and_journal(monkeypatch, tmp_path, result, 
         monkeypatch.setattr(module, 'SESSION_DIR', session_dir)
     monkeypatch.setattr(models, 'SESSION_INDEX_FILE', session_dir / '_index.json')
     monkeypatch.setattr(models, 'SESSIONS', OrderedDict())
+    # Runtime session reuse, not the class wrapper cache, owns FakeAgent here.
+    monkeypatch.setattr(config, 'SESSION_AGENT_CACHE', OrderedDict())
     monkeypatch.setattr(models, '_active_state_db_path', lambda: tmp_path / 'state.db')
     monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: tmp_path)
     for name in ('STREAMS', 'CANCEL_FLAGS', 'AGENT_INSTANCES', 'SESSION_AGENT_LOCKS', 'STREAM_LIVE_TOOL_CALLS'):
@@ -122,3 +124,36 @@ def test_real_callback_live_snapshot_and_journal(monkeypatch, tmp_path, result, 
     completed = [e for e in events if e.get('event') == 'tool_complete']
     assert len(completed) == 1
     assert completed[0]['payload']['is_error'] is expected
+
+@pytest.mark.parametrize('metadata', [{}, {'timestamp': 100.0}])
+def test_cross_source_prefix_consumes_occurrences_without_global_text_dedup(metadata):
+    from api.streaming import _dedupe_replayed_context_messages, _deduplicate_context_messages
+    previous = [{'role': 'user', 'content': 'continue', **metadata},
+                {'role': 'assistant', 'content': 'working', **metadata}]
+    current = copy.deepcopy(previous) + [{'role': 'user', 'content': 'continue'},
+                                         {'role': 'assistant', 'content': 'working'}]
+    assert _dedupe_replayed_context_messages(previous, current, 'continue') == current
+    assert _deduplicate_context_messages(current) == current
+
+
+def test_cross_source_timestamp_pairs_consume_once_and_keep_excess_occurrences():
+    from api.models import merge_session_messages_append_only
+    row = {'role': 'user', 'content': 'continue', 'timestamp': 100.0}
+    sidecar = [dict(row), dict(row)]
+    state = [dict(row), dict(row), dict(row)]
+    merged = merge_session_messages_append_only(sidecar, state)
+    assert len(merged) == 3
+    assert merged[:2] == sidecar
+
+
+@pytest.mark.parametrize('field,first,second', [
+    ('id', 'one', 'two'),
+    ('_state_db_row_id', 1, 2),
+    ('api_content', 'wire-one', 'wire-two'),
+    ('_active_turn_token', 'one', 'two'),
+])
+def test_aligned_prefix_cannot_override_conflicting_provenance(field, first, second):
+    from api.streaming import _messages_have_prefix, _message_replay_key
+    row = {'role': 'user', 'content': 'continue', 'timestamp': 100.0}
+    assert not _messages_have_prefix([{**row, field: second}],
+                                    [{**row, field: first}], key_fn=_message_replay_key)
