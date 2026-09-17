@@ -3799,6 +3799,12 @@ async function _loadOlderMessages() {
       // Prepending older messages must not teleport the reader. Anchor to the
       // first visible rendered row and restore that row's top offset after the
       // prepend so synthetic virtual spacer heights cannot skew the delta.
+      // A prepend can move the reader outside the newly estimated window.
+      // Mount that semantic row before restoring; a prefix-height write alone
+      // can leave the viewport in an unrendered spacer until another scroll.
+      if (viewportAnchor && typeof _remountMessageViewportAnchor === 'function') {
+        _remountMessageViewportAnchor(viewportAnchor);
+      }
       const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')
         ? _restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)
         : false;
@@ -3892,6 +3898,7 @@ async function _ensureAllMessagesLoaded(force = false) {
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
+      delete S.session._settlement_gap;
       if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {
         S.session.regeneration_revision = data.session.regeneration_revision;
       } else {
@@ -3959,7 +3966,7 @@ function syncFullTranscriptPreview(){
   const inner=$('msgInner');
   if(!inner) return;
   let notice=$('fullTranscriptPreview');
-  const clipped=(S.messages||[]).some(m=>m&&m._content_truncated)
+  const clipped=!!S.session?._settlement_gap || (S.messages||[]).some(m=>m&&m._content_truncated)
     || (S.session?.tool_calls||[]).some(tc=>tc&&tc._content_truncated);
   if(!S.session||!clipped){if(notice) notice.remove();return;}
   const sid=S.session.session_id;
@@ -4375,7 +4382,7 @@ function _renderBatchActionBar(){
     if(!ok)return;
     try{
       const results=await Promise.all(ids.map(async sid=>{
-        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})});
+        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,profile:(sessionsById.get(sid)||{}).profile||'default',archived:true})});
         return {response,session:sessionsById.get(sid)||null};
       }));
       const retainedCount=_worktreeResponseCount(results);
@@ -4910,7 +4917,7 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
-    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived})});
+    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,profile:session.profile||'default',archived})});
     session.archived=archived;
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
     if(cached) cached.archived=archived;
@@ -5023,7 +5030,7 @@ function _openSessionActionMenu(session, anchorEl){
       async()=>{
         closeSessionActionMenu();
         try{
-          await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived:true})});
+          await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,profile:session.profile||'default',archived:true})});
           _optimisticallyArchiveSessionInList(session.session_id,true);
           session.archived=true;
           if(S.session&&S.session.session_id===session.session_id) S.session.archived=true;

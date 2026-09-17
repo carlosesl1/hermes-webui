@@ -2233,7 +2233,7 @@ def test_gateway_post_save_cancel_after_success_commit_emits_done(tmp_path, monk
     session.save()
     models.SESSIONS[session_id] = session
 
-    original_payload = streaming._session_payload_with_full_messages
+    original_payload = streaming.bounded_settlement_session
     payload_calls = {"count": 0}
 
     def _payload_and_cancel_after_success_commit(*args, **kwargs):
@@ -2241,7 +2241,8 @@ def test_gateway_post_save_cancel_after_success_commit_emits_done(tmp_path, monk
         config.CANCEL_FLAGS[stream_id].set()
         return original_payload(*args, **kwargs)
 
-    monkeypatch.setattr(streaming, "_session_payload_with_full_messages", _payload_and_cancel_after_success_commit)
+    monkeypatch.setattr(streaming, "bounded_settlement_session", _payload_and_cancel_after_success_commit)
+    monkeypatch.setattr("api.render_payload.bounded_settlement_session", _payload_and_cancel_after_success_commit)
 
     gateway_chat._run_gateway_chat_streaming(
         session_id,
@@ -2367,7 +2368,7 @@ def test_streaming_post_save_cancel_after_success_commit_emits_done(tmp_path, mo
     session.save()
     models.SESSIONS[session_id] = session
 
-    original_payload = streaming._session_payload_with_full_messages
+    original_payload = streaming.bounded_settlement_session
     payload_calls = {"count": 0}
 
     def _payload_and_cancel_after_success_commit(*args, **kwargs):
@@ -2375,7 +2376,8 @@ def test_streaming_post_save_cancel_after_success_commit_emits_done(tmp_path, mo
         config.CANCEL_FLAGS[stream_id].set()
         return original_payload(*args, **kwargs)
 
-    monkeypatch.setattr(streaming, "_session_payload_with_full_messages", _payload_and_cancel_after_success_commit)
+    monkeypatch.setattr(streaming, "bounded_settlement_session", _payload_and_cancel_after_success_commit)
+    monkeypatch.setattr("api.render_payload.bounded_settlement_session", _payload_and_cancel_after_success_commit)
 
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
@@ -2419,7 +2421,7 @@ def test_streaming_no_pause_post_save_cancel_after_success_commit_emits_done(tmp
     session.save()
     models.SESSIONS[session_id] = session
 
-    original_payload = streaming._session_payload_with_full_messages
+    original_payload = streaming.bounded_settlement_session
     payload_calls = {"count": 0}
 
     def _payload_and_cancel_after_success_commit(*args, **kwargs):
@@ -2427,7 +2429,8 @@ def test_streaming_no_pause_post_save_cancel_after_success_commit_emits_done(tmp
         config.CANCEL_FLAGS[stream_id].set()
         return original_payload(*args, **kwargs)
 
-    monkeypatch.setattr(streaming, "_session_payload_with_full_messages", _payload_and_cancel_after_success_commit)
+    monkeypatch.setattr(streaming, "bounded_settlement_session", _payload_and_cancel_after_success_commit)
+    monkeypatch.setattr("api.render_payload.bounded_settlement_session", _payload_and_cancel_after_success_commit)
 
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \

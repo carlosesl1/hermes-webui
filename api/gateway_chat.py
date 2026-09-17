@@ -36,8 +36,12 @@ from api.config import (
     update_active_run,
 )
 from api.helpers import _redact_text, redact_session_data
-from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
+from api.models import clear_process_wakeup_pause, get_session
+# Compatibility export for integrations that imported the old gateway merge seam.
+# Active writeback still uses the replay-aware streaming reconciler below.
+from api.models import merge_session_messages_append_only as merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
+from api.tool_outcomes import tool_result_is_error
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +512,7 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
         return None
     status = str(payload.get("status") or "running").strip().lower()
     tid = payload.get("toolCallId") or payload.get("tool_call_id") or payload.get("id")
-    is_complete = event_type == "tool.completed" or status in {"completed", "complete", "success", "error", "failed"}
+    is_complete = event_type == "tool.completed" or status in {"completed", "complete", "success", "error", "failed", "cancelled", "canceled", "interrupted"}
     event_payload = {
         "event_type": "tool.completed" if is_complete else "tool.started",
         "name": name,
@@ -516,7 +520,7 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
         "args": bound_run_journal_snapshot_args(payload.get("args"))
         if isinstance(payload.get("args"), dict)
         else {},
-        "is_error": bool(payload.get("error")) or status in {"error", "failed"},
+        "is_error": tool_result_is_error(name, payload) or tool_result_is_error(name, payload.get("result")),
     }
     if tid:
         event_payload["tid"] = str(tid)
@@ -1319,21 +1323,9 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
             s.context_messages = previous_context + [user_msg, assistant_msg]
-            try:
-                from api.streaming import _is_context_compression_marker
-
-                display_context = [
-                    msg
-                    for msg in previous_context
-                    if not _is_context_compression_marker(msg)
-                ]
-            except Exception:
-                logger.debug("Failed to filter gateway display context markers", exc_info=True)
-                display_context = previous_context
-            display = merge_session_messages_append_only(
-                previous_messages,
-                display_context,
-            )
+            # The display merger owns ordered, occurrence-preserving context
+            # backfill. Pre-appending context here destroys its gap boundaries.
+            display = previous_messages
             try:
                 from api.streaming import _merge_display_messages_after_agent_result
 
@@ -1439,8 +1431,8 @@ def _run_gateway_chat_streaming(
                 session_id,
                 goal_exc,
             )
-        from api.streaming import _session_payload_with_full_messages
-        gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
+        from api.render_payload import bounded_settlement_session
+        gateway_session_payload = bounded_settlement_session(s, tool_calls=[])
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:

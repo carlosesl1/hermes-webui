@@ -1194,6 +1194,8 @@ _PROVIDER_DISPLAY = {
     "ollama-cloud": "Ollama Cloud",
     "opencode-zen": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
+    # Built-in even when the optional core provider registry is unavailable.
+    "kilocode": "Kilo Code",
     "lmstudio": "LM Studio",
     "mistralai": "Mistral",
     "qwen": "Qwen",
@@ -5559,6 +5561,7 @@ def _minimal_static_models_catalog() -> dict:
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": {},
+            "incomplete": True,
             "groups": groups,
             "aliases": {},
         })
@@ -9312,6 +9315,8 @@ class StreamChannel:
                 self._last_event_id = event_id
             subscribers = list(self._subscribers)
             if not subscribers:
+                if item[0] == "metering":
+                    return  # Live-only telemetry must not enter offline replay.
                 # deque(maxlen) evicts the oldest frame automatically when full.
                 # Log once on the first eviction (debug: an abandoned/disconnected
                 # turn is expected to hit this) and keep a running dropped count

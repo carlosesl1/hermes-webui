@@ -548,7 +548,7 @@ def test_post_process_runs_under_overflow_anchor_suppression():
         "browser overflow-anchor layer suppressed across the deferred post-render "
         "settle window (#5338 mobile 往回大跳 follow-up)."
     )
-    wrapper = UI_JS[wrapper_idx: wrapper_idx + 900]
+    wrapper = UI_JS[wrapper_idx: UI_JS.index("\n}", wrapper_idx) + 2]
     assert "_suppressBrowserOverflowAnchor(scroller)" in wrapper, (
         "_postProcessWithAnchorSuppression() must route through the shared "
         "_suppressBrowserOverflowAnchor() helper so desktop stays a verified no-op."

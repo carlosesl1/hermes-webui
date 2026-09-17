@@ -62,8 +62,9 @@ def test_replay_then_legacy_dup_is_deduped():
     First state 'a' is consumed by the replay-prefix branch; second must be
     caught by the dedup guard rather than appended.
     """
-    sidecar = [_identified("user", "hello", msg_id="a")]
-    a = _legacy("user", "hello")
+    # Shared timestamp proves the legacy mirror; text alone is ambiguous.
+    sidecar = [_identified("user", "hello", msg_id="a", timestamp=1.25)]
+    a = _legacy("user", "hello", timestamp=1.25)
     state = [a, a]
     result = merge_session_messages_append_only(sidecar, state)
     assert len(result) == 1, f"expected 1, got {len(result)}: {result}"

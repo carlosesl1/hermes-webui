@@ -126,8 +126,12 @@ def test_resolver_signature_passes_prefer_cached_catalog():
     refactors.
     """
     assert _has_prefer_cached_catalog_true_call(
-        routes._resolve_effective_session_model_for_display
+        routes._resolve_effective_session_model_state_for_display
     )
-    assert _has_prefer_cached_catalog_true_call(
-        routes._resolve_effective_session_model_provider_for_display
-    )
+    # Both legacy projections must delegate to the same cache-only resolver.
+    for resolver in (routes._resolve_effective_session_model_for_display,
+                     routes._resolve_effective_session_model_provider_for_display):
+        tree = ast.parse(inspect.getsource(resolver))
+        assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                   and node.func.id == "_resolve_effective_session_model_state_for_display"
+                   for node in ast.walk(tree))

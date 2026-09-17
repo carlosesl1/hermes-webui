@@ -174,7 +174,12 @@ def test_manual_compress_blocks_state_db_replay(monkeypatch, cleanup_test_sessio
         prefer_context=True,
         state_messages=state_db,
     )
-    assert len(merged) == len(loaded.context_messages)
+    assert len(merged) == len(loaded.context_messages), {
+        'watermark': loaded.truncation_watermark,
+        'boundary': loaded.truncation_boundary,
+        'context': loaded.context_messages,
+        'merged': merged,
+    }
 
 
 def test_startup_recovery_skips_intentional_manual_compress(monkeypatch, tmp_path):
@@ -331,3 +336,14 @@ def test_startup_recovery_fires_when_loss_shrinks_both_messages_and_context(monk
     assert result["restored"] == 1
     restored = json.loads(live_path.read_text(encoding="utf-8"))
     assert len(restored["messages"]) == 130
+
+
+def test_manual_compression_keeps_only_post_boundary_state_delta():
+    context = [_msg("user", "summary prompt", 100.0), _msg("assistant", "summary", 101.0)]
+    session = Session(session_id="manual-boundary-delta", messages=list(context), context_messages=list(context),
+                      compression_anchor_mode="manual", truncation_watermark=101.0, truncation_boundary=101.0)
+    old = [_msg("user", "summary prompt", 1.0), _msg("assistant", "summary", 2.0)]
+    new = [_msg("user", "legitimate new turn", 102.0), _msg("assistant", "new answer", 103.0)]
+    assert reconciled_state_db_messages_for_session(session, prefer_context=True, state_messages=old+new) == context+new
+    repeated = [_msg("user", "summary prompt", 102.0), _msg("assistant", "summary", 103.0)]
+    assert reconciled_state_db_messages_for_session(session, prefer_context=True, state_messages=old+repeated) == context+repeated

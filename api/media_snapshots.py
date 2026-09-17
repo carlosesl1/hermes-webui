@@ -413,6 +413,42 @@ def capture_snapshot(source: Path, *, max_file_bytes: int | None = None) -> str 
             return None
 
 
+def iter_public_media_text(message):
+    """Yield only public assistant/tool text, never arbitrary sidecar strings."""
+    if not isinstance(message, dict):
+        return
+    role = str(message.get("role") or "").strip().lower()
+    if role not in {"assistant", "tool"}:
+        return
+    content = message.get("content")
+    if isinstance(content, str):
+        yield content
+    elif isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in {"text", "output_text"}:
+                text = part.get("text")
+                if isinstance(text, str):
+                    yield text
+            elif isinstance(part, str):
+                yield part
+    if role != "assistant":
+        return
+    items = message.get("codex_message_items")
+    if not isinstance(items, list):
+        return
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "message" or item.get("role") != "assistant":
+            continue
+        if str(item.get("phase") or "").strip().lower() != "commentary":
+            continue
+        parts = item.get("content")
+        if not isinstance(parts, list):
+            continue
+        for part in parts:
+            if isinstance(part, dict) and part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                yield part["text"]
+
+
 def annotate_media_snapshots(
     messages: list,
     *,
@@ -449,10 +485,7 @@ def annotate_media_snapshots(
     for msg in messages or []:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
-        content = msg.get("content")
-        if not isinstance(content, str) or "MEDIA:" not in content:
-            continue
-        refs = media_re.findall(content)
+        refs = [ref for text in iter_public_media_text(msg) for ref in media_re.findall(text)]
         if not refs:
             continue
         existing = msg.get("_media_snapshots")

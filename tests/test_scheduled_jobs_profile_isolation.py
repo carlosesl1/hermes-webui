@@ -14,6 +14,7 @@ import os
 import pathlib
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import pytest
@@ -131,8 +132,15 @@ def test_cron_profile_context_serializes_concurrent_access(tmp_path):
 
     # Ensure the context lock is released between tests.
     from api import profiles as p
-    assert not p._cron_env_lock.locked(), \
-        "Lock leaked from a previous test"
+    # RLock has no public locked() on Python 3.12. A separate thread must
+    # acquire it, because acquiring on the owner thread is reentrant.
+    with ThreadPoolExecutor(1) as pool:
+        def probe_lock():
+            acquired = p._cron_env_lock.acquire(timeout=1)
+            if acquired:
+                p._cron_env_lock.release()
+            return acquired
+        assert pool.submit(probe_lock).result(timeout=2), "Lock leaked from a previous test"
 
     observed = []
     barrier = threading.Barrier(2)
@@ -140,7 +148,9 @@ def test_cron_profile_context_serializes_concurrent_access(tmp_path):
     def worker(home, tag):
         barrier.wait()
         with cron_profile_context_for_home(home):
-            observed.append(("enter", tag, os.environ["HERMES_HOME"]))
+            from hermes_constants import get_hermes_home
+            assert get_hermes_home() == home
+            observed.append(("enter", tag, str(get_hermes_home())))
             # If serialization works, the partner thread cannot be inside
             # its own context at this moment.
             observed.append(("exit", tag))

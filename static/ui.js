@@ -947,6 +947,9 @@ function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container
 function _messageVirtualKeepTailCount(){
   return Math.min(_currentMessageRenderWindowSize(), MESSAGE_RENDER_WINDOW_DEFAULT);
 }
+// Carry only the last scroll write's subpixel error, not an old viewport snapshot.
+// Chromium quantizes scrollTop; recapturing its half-pixel error each render
+// otherwise walks a stationary reader away over successive stream updates.
 function _captureMessageViewportAnchor(){
   const container=$('messages');
   if(!container) return null;
@@ -956,18 +959,23 @@ function _captureMessageViewportAnchor(){
     const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
     if(!Number.isFinite(rawIdx)) continue;
     const rect=row.getBoundingClientRect();
-    if(rect.bottom>containerRect.top+1){
+    if(rect.bottom>rect.top&&rect.bottom>containerRect.top+1&&rect.top<containerRect.bottom-1){
       const sessionIdx=Number(row&&row.dataset&&row.dataset.sessionMsgIdx);
       // Record the current top-spacer (virtual topPad) height so the compensation
       // path can fall back to a topPad-delta shift when the anchor row itself is
       // recycled out of the render window after a measurement-driven re-render.
       const spacer=container.querySelector('[data-virtual-spacer="before"]');
       const topPadBefore=spacer?parseFloat(spacer.style.height||'0')||0:0;
+      const residue=container._messageAnchorRoundingResidual;
+      const key=row&&row.dataset?String(row.dataset.messageAnchorKey||''):'';
+      const carry=residue&&residue.key===key&&residue.sessionId===(S.session&&S.session.session_id)&&
+        residue.scrollTop===container.scrollTop&&residue.inputGeneration===(typeof _messageScrollInputGeneration==='number'?_messageScrollInputGeneration:0)
+        ? residue.delta : 0;
       return {
         rawIdx,
         sessionIdx:Number.isFinite(sessionIdx)?sessionIdx:_messageSessionIndexForRawIdx(rawIdx),
         key:row&&row.dataset?String(row.dataset.messageAnchorKey||''):'',
-        topOffset:rect.top-containerRect.top,
+        topOffset:rect.top-containerRect.top-carry,
         topPadBefore,
         // Snapshot the scroll height at capture so a later realign can detect that
         // content grew between capture and restore — the streaming case where the
@@ -1156,6 +1164,11 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const _releaseAnchorSuppression=(typeof _suppressBrowserOverflowAnchor==='function')
     ? _suppressBrowserOverflowAnchor(container) : null;
   container.scrollTop+=(rect.top-containerRect.top)-targetTop;
+  const roundingDelta=row.getBoundingClientRect().top-container.getBoundingClientRect().top-targetTop;
+  container._messageAnchorRoundingResidual=Math.abs(roundingDelta)<=1 ? {
+    key:row.dataset&&row.dataset.messageAnchorKey||'', sessionId:typeof S!=='undefined'&&S.session?S.session.session_id:null,
+    scrollTop:container.scrollTop, inputGeneration:typeof _messageScrollInputGeneration==='number'?_messageScrollInputGeneration:0, delta:roundingDelta,
+  } : null;
   if(_releaseAnchorSuppression) _releaseAnchorSuppression();
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
   else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
@@ -1260,7 +1273,7 @@ function _compensateScrollForMeasurementDelta(renderFn){
   const delta=actualOffset-anchorBefore.topOffset;
   if(Math.abs(delta)<2) return;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-  container.scrollTop=scrollTopBefore+delta;
+  container.scrollTop+=delta;
   _lastScrollTop=container.scrollTop;
   _deferClearProgrammaticScroll();
 }
@@ -16086,6 +16099,7 @@ function _captureMessageScrollSnapshot(){
     (typeof _recentMessageScrollIntent==='function'&&_recentMessageScrollIntent())
   );
   return {
+    sessionId:typeof S!=='undefined'&&S.session?S.session.session_id:null,
     anchor:(typeof _captureMessageViewportAnchor==='function')?_captureMessageViewportAnchor():null,
     top:el.scrollTop,
     bottom,
@@ -16145,6 +16159,9 @@ function _restorePinnedMessageScrollSnapshot(snapshot){
 function _restoreMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
+  // A delayed restore from session A must not reposition or unpin session B.
+  if(Object.prototype.hasOwnProperty.call(snapshot,'sessionId') &&
+     snapshot.sessionId!==(typeof S!=='undefined'&&S.session?S.session.session_id:null)) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
   // If the reader was following the live tail, preserve the tail-relative bottom
   // distance. Do not semantic-anchor to the first visible row: live Worklog/
@@ -16370,6 +16387,9 @@ function _desktopAnchorRealignDelta(container, anchor){
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
+  // A delayed restore from session A must not reposition or unpin session B.
+  if(Object.prototype.hasOwnProperty.call(snapshot,'sessionId') &&
+     snapshot.sessionId!==(typeof S!=='undefined'&&S.session?S.session.session_id:null)) return;
   // Same-frame live DOM updates (tool/worklog/activity rows) are the hot path for
   // streaming. Pinned followers must stay tail-relative here too; restoring the
   // semantic viewport anchor is only safe for explicitly unpinned readers.
@@ -19684,12 +19704,17 @@ async function regenerateResponse(btn) {
 // it) in the same suppression so the browser layer cannot re-anchor during the
 // async settle window. Desktop rests at `none`, so this is a no-op there.
 function _postProcessWithAnchorSuppression(container){
+  if(container && container.isConnected===false) return;
+  const snapshot=_captureMessageScrollSnapshot();
   const scroller=$('messages');
   const release=(scroller&&typeof _suppressBrowserOverflowAnchor==='function')
     ? _suppressBrowserOverflowAnchor(scroller) : null;
   try{
     postProcessRenderedMessages(container);
   }finally{
+    // Suppression alone leaves no anchor owner on desktop (or suppressed touch).
+    // Compensate synchronous highlighter/preview layout using the current reader.
+    _restoreMessageScrollSnapshot(snapshot);
     // Hold suppression across ONE more frame so late media/layout reflow
     // (image decode, katex/mermaid measure) cannot re-anchor either, then let
     // _suppressBrowserOverflowAnchor's own rAF-deferred restore run.

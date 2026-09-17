@@ -61,14 +61,15 @@ def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
         "get_profile_runtime_env",
         lambda home: {"HERMES_CONFIG_PATH": str(Path(home) / "config.yaml")},
     )
-    monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: None)
+    monkeypatch.setattr(profiles, "_hermes_home_override_available", None)
 
     patch_calls: list[dict] = []
 
     def fake_save(self, *args, **kwargs):
         captured["kwargs"] = kwargs
         captured["thread_env"] = dict(getattr(config._thread_ctx, "env", {}) or {})
-        captured["env_hermes_home"] = os.environ.get("HERMES_HOME")
+        from hermes_constants import get_hermes_home
+        captured["env_hermes_home"] = str(get_hermes_home())
 
     def patch_skill_home_modules(*_):
         patch_calls.append({"patched": True})

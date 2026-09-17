@@ -11,7 +11,7 @@ def test_stream_completion_syncs_rotated_session_id_to_tab_state():
     # #3018 inserted a carry-forward of ephemeral per-turn fields into both the
     # completion (_finishDone) and settled-restore assignments; match the new shapes.
     completion_marker = re.compile(
-        r"S\.session=d\.session;\s*"
+        r"S\.session=\{\.\.\.S\.session,\.\.\.d\.session\};\s*"
         r"S\.messages=_carryForwardEphemeralTurnFields\(S\.messages\|\|\[\], d\.session\.messages\|\|\[\]\);"
     )
     settled_marker = "S.session=session;\n        const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);"
@@ -27,7 +27,7 @@ def test_stream_completion_syncs_rotated_session_id_to_tab_state():
     # stale-prefix guard before the tab-state sync, so keep the assertion local
     # to the handler while widening the slice enough to cover the new helper
     # state and the unchanged localStorage/update-url writes.
-    completion_block = MESSAGES_JS[completion_pos : completion_pos + 1000]
+    completion_block = MESSAGES_JS[completion_pos : completion_pos + 1800]
     settled_block = MESSAGES_JS[settled_pos : settled_pos + 1800]
 
     for block in (completion_block, settled_block):

@@ -92,19 +92,37 @@ def test_gateway_queue_item_carries_per_event_id_with_legacy_fallback():
     assert "q.put_nowait(queue_item)" in put_body
 
 
-def test_sse_handler_reads_event_id_from_side_channel():
-    """The SSE consumer in _handle_sse_stream must read STREAM_LAST_EVENT_ID
-    and pass it to _sse_with_id when present."""
-    handler_idx = ROUTES_PY.find("def _handle_sse_stream(handler, parsed):")
-    assert handler_idx != -1, "_handle_sse_stream not found"
-    handler_body = ROUTES_PY[handler_idx:handler_idx + 5400]
-    assert "STREAM_LAST_EVENT_ID.get(stream_id)" in handler_body, (
-        "_handle_sse_stream must read STREAM_LAST_EVENT_ID[stream_id] to "
-        "get the event_id for emit"
-    )
-    assert "_sse_with_id(handler, event, data, event_id)" in handler_body, (
-        "_handle_sse_stream must call _sse_with_id when event_id is set"
-    )
+@pytest.mark.parametrize("legacy", [False, True])
+def test_sse_handler_writes_actual_frame_cursors(tmp_path, monkeypatch, legacy):
+    """Exercise dispatch and the real wire writer, not its old inline location."""
+    import io
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+    from api import routes
+
+    channel = queue.Queue() if legacy else config.StreamChannel()
+    cursors = {}
+    monkeypatch.setattr(streaming, "STREAM_LAST_EVENT_ID", cursors)
+    monkeypatch.setattr(routes, "STREAM_LAST_EVENT_ID", cursors)
+    monkeypatch.setattr(routes, "peek_stream", lambda _: channel)
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_: True)
+    monkeypatch.setattr(routes, "_sse_replay_run_journal_gap_checked", lambda *_a, **_k: (False, None))
+    writer = run_journal.RunJournalWriter("sid", "run", session_dir=tmp_path)
+    for event, payload in [("token", {"text": "first"}), ("token", {"text": "second"}),
+                           ("done", {"session": {"session_id": "sid"}}),
+                           ("stream_end", {"session_id": "sid"})]:
+        streaming._publish_stream_event(writer, channel, "run", event, payload)
+    handler = SimpleNamespace(headers={}, wfile=io.BytesIO(),
+                              send_response=lambda *_: None, send_header=lambda *_: None,
+                              end_headers=lambda: None)
+    assert routes._handle_sse_stream(handler, urlparse("/api/chat/stream?stream_id=run"))
+    frames = handler.wfile.getvalue().decode().strip().split("\n\n")
+    expected = ["run:4"] * 4 if legacy else ["run:1", "run:2", "run:3", "run:4"]
+    assert [frame.splitlines()[0] for frame in frames] == [f"id: {cursor}" for cursor in expected]
+    assert [frame.splitlines()[1] for frame in frames] == ["event: token", "event: token", "event: done", "event: stream_end"]
+    assert '"first"' in frames[0] and '"second"' in frames[1]
+    if not legacy:
+        assert channel.diagnostic_snapshot()["subscriber_count"] == 0
 
 
 def test_cleanup_pops_stream_last_event_id():

@@ -280,39 +280,44 @@ class TestIssue765FollowupHardening:
     def test_same_session_concurrent_saves_use_distinct_temp_files(self, monkeypatch):
         """Two concurrent saves of the same session must not collide on one tmp path.
 
-        The key regression guard here is that each save call should reach os.replace()
-        with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
-        threads would target the same path and the second replace would deterministically
-        fail once the first consume/remove happened.
+        Start both callers together, outside the per-session save lock. Waiting
+        inside os.replace() deadlocks intentionally serialized saves. Each caller
+        must publish a distinct temporary file and preserve established history.
         """
         s = _make_session("same_sid")
         s.save(skip_index=True)  # seed the file on disk
+        established = json.loads(s.path.read_text(encoding="utf-8"))["messages"]
+        s.messages.append({"role": "assistant", "content": "checkpoint answer"})
 
         original_replace = models.os.replace
         barrier = threading.Barrier(2)
         replace_sources = []
+        published_snapshots = []
         errors = []
 
-        def _replace_with_barrier(src, dst):
-            replace_sources.append(str(src))
-            barrier.wait(timeout=5)
+        def _record_replace(src, dst):
+            if Path(dst) == s.path:
+                replace_sources.append(str(src))
+                published_snapshots.append(Path(src).read_bytes())
             return original_replace(src, dst)
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _record_replace)
 
         def _save_worker():
             try:
+                barrier.wait(timeout=5)
                 s.save(skip_index=True)
             except Exception as e:
                 errors.append(e)
 
-        t1 = threading.Thread(target=_save_worker)
-        t2 = threading.Thread(target=_save_worker)
+        t1 = threading.Thread(target=_save_worker, daemon=True)
+        t2 = threading.Thread(target=_save_worker, daemon=True)
         t1.start()
         t2.start()
         t1.join(timeout=5)
         t2.join(timeout=5)
 
+        assert not t1.is_alive() and not t2.is_alive(), "Both save callers must finish"
         assert not errors, f"Concurrent same-session saves should not fail: {errors}"
         assert len(replace_sources) >= 2, f"Expected replace calls, got {replace_sources}"
         assert len(set(replace_sources)) == 2, (
@@ -321,6 +326,14 @@ class TestIssue765FollowupHardening:
         )
         data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["session_id"] == "same_sid"
+        assert s.path.read_bytes() in published_snapshots
+        for snapshot in published_snapshots:
+            saved = json.loads(snapshot)
+            assert saved["messages"][:len(established)] == established
+            assert saved["messages"] == s.messages
+            assert saved["message_count"] == len(s.messages)
+        assert data["messages"] == s.messages
+        assert not list(s.path.parent.glob("*.tmp.*"))
 
     def test_success_path_joins_checkpoint_before_session_mutation(self):
         """Static guard: success path must stop/join checkpoint thread before mutating.

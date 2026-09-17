@@ -427,6 +427,13 @@ def append_run_event(
             or (event_name == "cancel" and summary.get("terminal"))
         ):
             return None
+        # Telemetry is live-only: retain publication ordering and cancellation
+        # fencing, but do not allocate a durable cursor or touch the file.
+        if event_name == "metering" and cancel_safe:
+            event = {"event": event_name, "payload": payload, "event_id": None}
+            if publish is not None:
+                publish(event)
+            return event
         if seq is not None:
             assigned_seq = int(seq)
             _note_assigned_seq(path, assigned_seq)

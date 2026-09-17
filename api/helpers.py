@@ -3,7 +3,10 @@ Hermes Web UI -- HTTP helper functions.
 """
 import base64 as _base64
 import binascii as _binascii
-import functools
+import hashlib
+import sys
+import threading
+from collections import OrderedDict
 import json as _json
 import logging
 import os
@@ -434,10 +437,16 @@ def _build_redact_fn():
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
         return text
 
+    # An opaque scope never retains the closure or any credential rules.
+    fallback_scope = object()
+
+    def _memoized_fallback(text):
+        return _redact_memo.apply(text, fallback_scope, _fallback_redact)
+
     try:
         from agent.redact import redact_sensitive_text
     except ImportError:
-        return _fallback_redact
+        return _memoized_fallback
 
     def _combined_redact(text: str) -> str:
         if not isinstance(text, str) or not text:
@@ -453,30 +462,83 @@ def _build_redact_fn():
             # Older hermes-agent builds that predate the force kwarg.
             agent_redacted = redact_sensitive_text(text)
         agent_redacted = _restore_code_env_key_literals(text, agent_redacted)
-        return _fallback_redact(agent_redacted)
+        return _memoized_fallback(agent_redacted)
 
     return _combined_redact
 
 
-_redact_fn_uncached = _build_redact_fn()
+class _BoundedTextMemo:
+    """LRU for proven-pure string transforms, never mutable response objects.
 
-# Repeated dashboard polls re-request the same unchanged session payloads, so
-# the combined redactor (~15 regex passes per string) was the dominant CPU cost
-# under concurrent polling — enough to wedge the single-process server behind
-# the GIL and surface as "Mất kết nối" in the browser. The redactor is pure and
-# deterministic (force=True, fixed masking), so identical strings always map to
-# identical output and are safe to memoize without invalidation.
-_redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
+    Input and output must be exact immutable builtins, and rules must be an
+    opaque object() scope owned by a proven-pure caller, not a mutable rule graph.
+    Keys are process-keyed digests plus scope identity, never plaintext. Retained
+    input verifies exact equality, so digest collisions cannot change output.
+    Bytes charge strings, scope, key and conservative entry overhead; eviction
+    additionally measures the actual OrderedDict allocation (including churn).
+    The fixed empty memo/lock/salt and temporary work are outside the retention
+    budget. Expensive work stays outside the lock.
+    """
 
-# Cap per-entry size so a handful of giant tool-output dumps can't evict the
-# thousands of small recurring strings that actually benefit, or balloon RSS.
+    def __init__(self, *, max_entries=4096, max_bytes=8 * 1024 * 1024,
+                 max_entry_bytes=1024 * 1024):
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self.max_entry_bytes = max_entry_bytes
+        self.entries = OrderedDict()
+        self.bytes = 0
+        self._lock = threading.Lock()
+        self._salt = os.urandom(32)
+
+    def _key(self, text):
+        return hashlib.blake2b(text.encode("utf-8", "surrogatepass"),
+                               key=self._salt, digest_size=32).digest()
+
+    def apply(self, text, rules, transform):
+        # Only immutable builtins may be retained. Subclasses can override
+        # equality/encoding, and mutable results must never become shared hits.
+        if type(text) is not str or type(rules) is not object or self.max_entries <= 0:
+            return transform(text)
+        input_bytes = sys.getsizeof(text)
+        if input_bytes + 512 > min(self.max_entry_bytes, self.max_bytes):
+            return transform(text)
+        key = self._key(text) + id(rules).to_bytes(16, "big")
+        with self._lock:
+            entry = self.entries.get(key)
+            if entry is not None and entry[0] is rules and entry[1] == text:
+                self.entries.move_to_end(key)
+                return entry[2]
+        result = transform(text)
+        if type(result) not in (str, bool):
+            return result
+        cost = input_bytes + sys.getsizeof(result) + sys.getsizeof(rules) + sys.getsizeof(key) + 512
+        if cost > min(self.max_entry_bytes, self.max_bytes):
+            return result
+        with self._lock:
+            previous = self.entries.pop(key, None)
+            if previous is not None:
+                self.bytes -= previous[3]
+            self.entries[key] = (rules, text, result, cost)
+            self.bytes += cost
+            while self.entries and (len(self.entries) > self.max_entries
+                                    or self.bytes + sys.getsizeof(self.entries) > self.max_bytes):
+                self.bytes -= self.entries.popitem(last=False)[1][3]
+            if not self.entries:
+                self.entries.clear()
+        return result
+
+
+_redact_memo = _BoundedTextMemo()
+# Legacy diagnostic constant; actual admission is measured in Python bytes.
 _REDACT_CACHE_MAX_TEXT_LEN = 16384
+_redact_fn_uncached = _build_redact_fn()
 
 
 def _redact_fn_cached(text):
-    if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
-        return _redact_fn_uncached(text)
-    return _redact_fn_lru(text)
+    # Agent/plugin redactors may consult live credentials, profiles or mutable
+    # rules. Never cache their output using only a callable's identity. The
+    # local immutable fallback and prefilter own the only persistent memos.
+    return _redact_fn_uncached(text)
 
 
 _SENSITIVE_CASE_MARKERS = (
@@ -559,20 +621,55 @@ _SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
 _SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
 
 
+_DEFAULT_SENSITIVE_REGEXES = (_SENSITIVE_TELEGRAM_MARKER_RE,
+                            _SENSITIVE_DISCORD_MARKER_RE, _SENSITIVE_PHONE_MARKER_RE)
+_prefilter_scope_lock = threading.Lock()
+_prefilter_scope_rules = None
+_prefilter_scope = None
+
+
+def _sensitive_rules():
+    return (_SENSITIVE_CASE_MARKERS, _SENSITIVE_LOWER_MARKERS,
+            _SENSITIVE_TELEGRAM_MARKER_RE, _SENSITIVE_DISCORD_MARKER_RE,
+            _SENSITIVE_PHONE_MARKER_RE)
+
+
 def _might_contain_sensitive_text(text: str) -> bool:
-    """Cheap prefilter before the full agent+fallback redaction pass."""
     if not isinstance(text, str) or not text:
         return False
-    if any(marker in text for marker in _SENSITIVE_CASE_MARKERS):
+    rules = _sensitive_rules()
+    # Custom search objects and mutable marker collections may change in place.
+    # Only known immutable builtins are eligible for a persistent negative memo.
+    if not (all(type(markers) is tuple and all(type(m) is str for m in markers)
+                for markers in rules[:2])
+            and all(type(regex) is _re.Pattern for regex in rules[2:])):
+        return _might_contain_sensitive_text_uncached(text, rules)
+    global _prefilter_scope_rules, _prefilter_scope
+    with _prefilter_scope_lock:
+        if (_prefilter_scope_rules is None
+                or any(a is not b for a, b in zip(rules, _prefilter_scope_rules, strict=False))):
+            _prefilter_scope_rules = rules
+            _prefilter_scope = object()
+        scope = _prefilter_scope
+    return _redact_memo.apply(
+        text, scope, lambda value: _might_contain_sensitive_text_uncached(value, rules))
+
+
+def _might_contain_sensitive_text_uncached(text: str, rules) -> bool:
+    """Evaluate exactly the captured rule snapshot, including case folding."""
+    case_markers, lower_markers, telegram, discord, phone = rules
+    if not isinstance(text, str) or not text:
+        return False
+    if any(marker in text for marker in case_markers):
         return True
     lower = text.lower()
-    if any(marker in lower for marker in _SENSITIVE_LOWER_MARKERS):
+    if any(marker in lower for marker in lower_markers):
         return True
-    if ":" in text and _SENSITIVE_TELEGRAM_MARKER_RE.search(text):
+    if (":" in text or telegram is not _DEFAULT_SENSITIVE_REGEXES[0]) and telegram.search(text):
         return True
-    if "<@" in text and _SENSITIVE_DISCORD_MARKER_RE.search(text):
+    if ("<@" in text or discord is not _DEFAULT_SENSITIVE_REGEXES[1]) and discord.search(text):
         return True
-    if "+" in text and _SENSITIVE_PHONE_MARKER_RE.search(text):
+    if ("+" in text or phone is not _DEFAULT_SENSITIVE_REGEXES[2]) and phone.search(text):
         return True
     return False
 
@@ -951,17 +1048,26 @@ def _is_complete_bmp(raw: bytes) -> bool:
     )
 
 
-def _redact_value(v, *, _enabled: bool | None = None):
+def _redact_value(v, *, _enabled: bool | None = None, _owned: bool = False):
     """Recursively redact credentials from strings, dicts, and lists.
 
     ``_enabled`` is threaded through so a single response-level redact pass
-    only reads settings.json once. (Opus pre-release perf fix.)
+    only reads settings.json once. ``_owned`` is exclusively for fresh deep
+    copies returned by the schema scrubber, never caller-owned JSON.
     """
     if isinstance(v, str):
         return _redact_text(v, _enabled=_enabled)
     if isinstance(v, dict):
+        if _owned:
+            for key, value in v.items():
+                v[key] = _redact_value(value, _enabled=_enabled, _owned=True)
+            return v
         return {key: _redact_value(value, _enabled=_enabled) for key, value in v.items()}
     if isinstance(v, list):
+        if _owned:
+            for index, item in enumerate(v):
+                v[index] = _redact_value(item, _enabled=_enabled, _owned=True)
+            return v
         return [_redact_value(item, _enabled=_enabled) for item in v]
     return v
 
@@ -1140,7 +1246,7 @@ def _public_message_projection(message, *, _enabled: bool, _active_turn_token=No
                 for part in value
             ]
         else:
-            item[key] = _redact_value(value, _enabled=_enabled)
+            item[key] = _redact_value(value, _enabled=_enabled, _owned=True)
     if is_active:
         item["_active_turn_user"] = True
     return item
@@ -1161,14 +1267,14 @@ def _redact_messages(messages, *, _enabled: bool, _active_turn_token=None):
 
 def _redact_tool_calls(tool_calls, *, _enabled: bool):
     scrubbed = scrub_internal_replay_fields(tool_calls, message_records=False)
-    return _redact_value(scrubbed, _enabled=_enabled)
+    return _redact_value(scrubbed, _enabled=_enabled, _owned=True)
 
 
 def _redact_nested_message_containers(value, *, _enabled: bool):
     """Redact only the runtime snapshot's authoritative message arrays."""
     scrubbed = scrub_internal_replay_fields(value)
     if not isinstance(scrubbed, dict):
-        return _redact_value(scrubbed, _enabled=_enabled)
+        return _redact_value(scrubbed, _enabled=_enabled, _owned=True)
     result = {}
     for key, child in scrubbed.items():
         if key in {"messages", "context_messages"} and isinstance(child, list):

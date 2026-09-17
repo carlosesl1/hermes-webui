@@ -142,6 +142,9 @@ def get_stream_runtime_snapshot() -> dict[str, object]:
     return result
 
 
+from api.render_payload import bounded_settlement_session
+
+
 def _session_payload_with_full_messages(session, *, tool_calls=None):
     """Return compact session metadata plus the embedded full transcript.
 
@@ -2790,22 +2793,10 @@ def _set_streaming_hermes_home_override(profile_home: str):
     Returns ``(module, token, installed)`` so callers can restore it with the
     matching module in the inverse order.
     """
+    from api.profiles import install_profile_home_scope
     if not profile_home:
-        return None, None, False
-
-    _home_override_mod = _resolve_streaming_hermes_home_override()
-    if _home_override_mod is None:
-        return None, None, False
-
-    try:
-        _token = _home_override_mod.set_hermes_home_override(profile_home)
-        return _home_override_mod, _token, True
-    except Exception:
-        logger.debug(
-            "Failed to set streaming Hermes home override; continuing with os.environ mirror",
-            exc_info=True,
-        )
-        return None, None, False
+        raise RuntimeError("Cannot run without a resolved profile home")
+    return install_profile_home_scope(profile_home)
 
 
 def _reset_streaming_hermes_home_override(override_mod, override_token, override_installed: bool) -> None:
@@ -5876,7 +5867,8 @@ def _deduplicate_context_messages(messages):
         # text but different durable ``api_content`` sidecars are distinct turns.
         # Keep the display identity unchanged so ordinary transcript dedup still
         # collapses the same visible row.
-        key = _message_replay_key(msg)
+        from api.models import _message_occurrence_key
+        key = (_message_replay_key(msg), _message_occurrence_key(msg))
         if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
             user_exact_key = (
                 key,
@@ -6319,7 +6311,15 @@ def _messages_have_prefix(messages, prefix, *, key_fn=None):
     if len(messages or []) < len(prefix or []):
         return False
     for idx, expected in enumerate(prefix or []):
-        if key_fn((messages or [])[idx]) != key_fn(expected):
+        actual = (messages or [])[idx]
+        if key_fn is _message_replay_key:
+            # These are aligned copies of the same full history, not a global
+            # seen-text set. Each position is consumed once. Runtime projection
+            # may strip row IDs/timestamps, but conflicting provenance is fatal.
+            from api.models import _cross_source_replay_match
+            if not _cross_source_replay_match(expected, actual, allow_legacy=True):
+                return False
+        elif key_fn(actual) != key_fn(expected):
             return False
     return True
 
@@ -6367,7 +6367,11 @@ def _strip_replayed_prefix(existing_messages, candidates):
     for overlap in range(max_overlap, 0, -1):
         left = [_message_replay_key(m) for m in existing_messages[-overlap:]]
         right = [_message_replay_key(m) for m in candidates[:overlap]]
-        if left == right:
+        from api.models import _cross_source_replay_match
+        if left == right and all(
+            _cross_source_replay_match(a, b, allow_legacy=overlap >= 3)
+            for a, b in zip(existing_messages[-overlap:], candidates[:overlap], strict=True)
+        ):
             return candidates[overlap:]
     return candidates
 
@@ -6397,6 +6401,9 @@ def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
     )
     if normalized_previous_api_content != normalized_candidate_api_content:
         return False
+    from api.models import _message_private_identity_compatible
+    if not _message_private_identity_compatible(previous_msg, candidate_msg):
+        return False
     previous_text = " ".join(_message_text(previous_msg.get('content', '')).split())
     candidate_text = " ".join(_message_text(candidate_msg.get('content', '')).split())
     if len(previous_text) < 2000 or len(candidate_text) < 2000:
@@ -6419,6 +6426,7 @@ def _strip_replayed_context_items(existing_messages, candidates):
     existing_large = [m for m in existing_messages if isinstance(m, dict)]
     cleaned = []
     idx = 0
+    from api.models import _message_private_identity_compatible
     min_block = 3
     while idx < len(candidates):
         msg = candidates[idx]
@@ -6433,6 +6441,7 @@ def _strip_replayed_context_items(existing_messages, candidates):
                 idx + length < len(candidate_keys)
                 and start + length < len(existing_keys)
                 and candidate_keys[idx + length] == existing_keys[start + length]
+                and _message_private_identity_compatible(candidates[idx + length], existing_messages[start + length])
             ):
                 length += 1
             if length > best:
@@ -7407,7 +7416,7 @@ def _merge_display_messages_after_agent_result(
             and isinstance(msg, dict)
             and msg.get('role') == 'assistant'
             and merged
-            and _message_identity(merged[-1]) == key
+            and _message_replay_key(merged[-1]) == _message_replay_key(msg)
         ):
             # Some provider/result replay paths can include the same assistant
             # message twice in the current delta. Treat only adjacent identity
@@ -9048,7 +9057,6 @@ def _run_agent_streaming(
     old_session_key = None
     old_session_id = None
     old_session_platform = None
-    old_hermes_home = None
     old_profile_env = {}
     result = None
     _result_partial_pre_call_context = []
@@ -9528,7 +9536,11 @@ def _run_agent_streaming(
             _profile_home = str(_profile_home_path)
             _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
-            _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
+            _safe_profile_runtime_env = {
+                key: value for key, value in
+                filter_runtime_env_for_gateway_parity(_profile_runtime_env).items()
+                if key != "HERMES_HOME"
+            }
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
@@ -9645,7 +9657,6 @@ def _run_agent_streaming(
             old_session_id = os.environ.get('HERMES_SESSION_ID')
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
-            old_hermes_home = os.environ.get('HERMES_HOME')
             os.environ.update(_safe_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
@@ -9655,21 +9666,11 @@ def _run_agent_streaming(
             # process_complete wiring (ours-original, Option B): see
             # _build_agent_thread_env above.
             os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
-            if _profile_home:
-                os.environ['HERMES_HOME'] = _profile_home
-                # Prefer context-local Hermes-home overrides when available.
-                # In that mode, tools.skills_tool._skills_dir() and
-                # tools.skill_manager_tool._skills_dir() can resolve the active
-                # profile from get_hermes_home() and keep per-thread isolation
-                # without mutating module globals. If override installation
-                # succeeds for both modules, skip process-cache patching.
-                # If either module is static/missing/raises, the legacy path
-                # above has already snapshotted and patched under this lock.
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
-        # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
-        # reads `~/.hermes/config.yaml` via `get_hermes_home()`, which uses
-        # `os.environ['HERMES_HOME']`.  Calling it before the mutation always
+        # MUST run AFTER the context-local home binding above. Discovery reads
+        # config via get_hermes_home(), not a request-time process env mirror.
+        # Calling it before the binding previously
         # loaded the default profile's `mcp_servers`, even when the session
         # was stamped with a non-default profile.  See issue #1968.
         #
@@ -10134,6 +10135,8 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed':
+                    from api.tool_outcomes import tool_result_is_error
+                    cb_kwargs['is_error'] = tool_result_is_error(name, cb_kwargs.get('result', preview), is_error=cb_kwargs.get('is_error'))
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
@@ -10231,8 +10234,10 @@ def _run_agent_streaming(
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool start', exc_info=True)
 
-            def on_tool_complete(tool_call_id, name, args, function_result):
+            def on_tool_complete(tool_call_id, name, args, function_result, **metadata):
                 try:
+                    from api.tool_outcomes import tool_result_is_error
+                    is_error = tool_result_is_error(name, function_result, is_error=metadata.get("is_error"))
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
@@ -10243,6 +10248,7 @@ def _run_agent_streaming(
                             if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
                                 live_tc['done'] = True
                                 live_tc['snippet'] = result_snippet
+                                live_tc['is_error'] = is_error
                                 break
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
@@ -10251,6 +10257,7 @@ def _run_agent_streaming(
                                 if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
                                     shared_tc['done'] = True
                                     shared_tc['snippet'] = result_snippet
+                                    shared_tc['is_error'] = is_error
                                     break
                         _checkpoint_activity[0] += 1
                         put('tool_complete', {
@@ -10259,7 +10266,7 @@ def _run_agent_streaming(
                             'preview': result_snippet,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
-                            'is_error': False,
+                            'is_error': is_error,
                         })
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can
@@ -12583,7 +12590,7 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
-                raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
+                raw_session = bounded_settlement_session(s, tool_calls=tool_calls)
                 _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
@@ -12668,8 +12675,6 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
                 if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
                 else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
-                if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
-                else: os.environ['HERMES_HOME'] = old_hermes_home
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
@@ -12903,7 +12908,7 @@ def _run_agent_streaming(
                                     s.pending_user_source = None
                                     s.save()
                                     _done_session_payload = redact_session_data(
-                                        _session_payload_with_full_messages(
+                                        bounded_settlement_session(
                                             s, tool_calls=s.tool_calls
                                         )
                                     )
@@ -13331,7 +13336,7 @@ def _publish_stream_event(run_journal, q, stream_id, event, data, *, should_appe
                 q.note_last_event_id(event_id)
             except Exception:
                 logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
-        queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+        queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
         try:
             q.put_nowait(queue_item)
         except Exception:
