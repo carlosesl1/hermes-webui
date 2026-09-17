@@ -3799,6 +3799,12 @@ async function _loadOlderMessages() {
       // Prepending older messages must not teleport the reader. Anchor to the
       // first visible rendered row and restore that row's top offset after the
       // prepend so synthetic virtual spacer heights cannot skew the delta.
+      // A prepend can move the reader outside the newly estimated window.
+      // Mount that semantic row before restoring; a prefix-height write alone
+      // can leave the viewport in an unrendered spacer until another scroll.
+      if (viewportAnchor && typeof _remountMessageViewportAnchor === 'function') {
+        _remountMessageViewportAnchor(viewportAnchor);
+      }
       const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')
         ? _restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)
         : false;
