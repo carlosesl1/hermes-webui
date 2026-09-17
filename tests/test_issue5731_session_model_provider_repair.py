@@ -46,7 +46,7 @@ def test_poisoned_pair_repairs_at_chat_start(monkeypatch, tmp_path):
         session_id="issue-5731",
         workspace=str(tmp_path),
         model="kilo/minimax/minimax-m3",
-        model_provider="ollama",
+        model_provider="openrouter",
         profile="default",
         messages=[],
         context_messages=[],
@@ -78,7 +78,7 @@ def test_poisoned_pair_repairs_at_chat_start(monkeypatch, tmp_path):
         lambda *, prefer_cache=False: (
             catalog_calls.append(prefer_cache)
             or _catalog(
-                _group("ollama", "llama3.2"),
+                _group("openrouter", "other-model"),
                 _group("kilocode", "@kilocode:kilo/minimax/minimax-m3"),
             )
         ),
@@ -95,12 +95,12 @@ def test_poisoned_pair_repairs_at_chat_start(monkeypatch, tmp_path):
 
 
 def test_catalog_equivalent_owner_repairs_poisoned_pair(monkeypatch):
-    session = _session(model="gpt-4o-mini", provider="ollama")
+    session = _session(model="gpt-4o-mini", provider="openrouter")
     monkeypatch.setattr(
         routes,
         "get_available_models",
         lambda *, prefer_cache=False: _catalog(
-            _group("ollama", "llama3.2"),
+            _group("openrouter", "other-model"),
             _group("kilocode", "GPT.4O.MINI"),
         ),
     )
@@ -109,12 +109,12 @@ def test_catalog_equivalent_owner_repairs_poisoned_pair(monkeypatch):
 
 
 def test_equivalent_request_model_repairs_poisoned_pair(monkeypatch):
-    session = _session(model="GPT.4O.MINI", provider="ollama")
+    session = _session(model="GPT.4O.MINI", provider="openrouter")
     monkeypatch.setattr(
         routes,
         "get_available_models",
         lambda *, prefer_cache=False: _catalog(
-            _group("ollama", "llama3.2"),
+            _group("openrouter", "other-model"),
             _group("kilocode", "gpt-4o-mini"),
         ),
     )

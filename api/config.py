@@ -5559,6 +5559,7 @@ def _minimal_static_models_catalog() -> dict:
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": {},
+            "incomplete": True,
             "groups": groups,
             "aliases": {},
         })

@@ -6546,6 +6546,7 @@ def _repair_foreign_session_model_provider(
     resolved_provider: str | None,
     explicit_model_pick: bool,
     profile_provider: str | None,
+    profile_config: dict | None = None,
 ) -> str | None:
     """Repair a stale provider only when the cached catalog names one owner."""
     stored_model = str(getattr(session, "model", "") or "").strip()
@@ -6574,21 +6575,47 @@ def _repair_foreign_session_model_provider(
     ):
         return resolved_provider
 
+    # A persisted deliberate choice is stronger evidence than catalog absence.
+    from api.models import model_explicit_pick_signature
+
+    if getattr(session, "model_explicit_pick_signature", None) == model_explicit_pick_signature(stored_model, stored_provider):
+        return resolved_provider
+
+    # A custom endpoint can serve any model, irrespective of the public catalog.
+    # Unknown/plugin and local lanes must never be inferred from catalog absence.
+    from api.config import _PROVIDER_DISPLAY, _PROVIDER_MODELS
+
+    known = set(_PROVIDER_DISPLAY) | set(_PROVIDER_MODELS)
+    local = {"ollama", "lmstudio", "vllm", "local", "custom", "moa"}
+    if stored_provider not in known or stored_provider in local or stored_provider.startswith("custom:"):
+        return resolved_provider
+    if profile_config is None:
+        _, _, profile_config = _read_profile_model_config(session, stored_provider)
+    config_obj = profile_config if isinstance(profile_config, dict) else {}
+    model_cfg = config_obj.get("model") or {}
+    if isinstance(model_cfg, dict) and model_cfg.get("base_url") and _providers_match_for_context(model_cfg.get("provider"), stored_provider):
+        return resolved_provider
+    providers_cfg = config_obj.get("providers") or {}
+    if isinstance(providers_cfg, dict) and any(
+        isinstance(value, dict) and value.get("base_url") and _providers_match_for_context(key, stored_provider)
+        for key, value in providers_cfg.items()
+    ):
+        return resolved_provider
     try:
         catalog = get_available_models(prefer_cache=True)
     except Exception:
         return resolved_provider
+    if not isinstance(catalog, dict) or catalog.get("incomplete"):
+        return resolved_provider
     groups = [group for group in catalog.get("groups") or [] if isinstance(group, dict)]
+    if any(group.get("models_endpoint_error") for group in groups):
+        return resolved_provider
     stored_groups = [
         group
         for group in groups
         if str(group.get("provider_id") or "").strip().lower() == stored_provider
     ]
-    if (
-        not stored_groups
-        or any(group.get("models_endpoint_error") for group in stored_groups)
-        or any(_catalog_group_owns_exact_model(group, stored_model) for group in stored_groups)
-    ):
+    if any(_catalog_group_owns_exact_model(group, stored_model) for group in stored_groups):
         return resolved_provider
     owners = [
         group
@@ -6598,7 +6625,17 @@ def _repair_foreign_session_model_provider(
     ]
     if len(owners) != 1:
         return resolved_provider
-    return str(owners[0].get("provider_id") or "").strip() or resolved_provider
+    owner = str(owners[0].get("provider_id") or "").strip()
+    if owner not in known or owner in local or owner.startswith("custom:"):
+        return resolved_provider
+    if not stored_groups:
+        # With no negative evidence from the old group, require an exact ID,
+        # not a suffix/family/punctuation match against another provider.
+        ids = [str(entry.get("id") or "") for bucket in ("models", "extra_models")
+               for entry in owners[0].get(bucket) or [] if isinstance(entry, dict)]
+        if stored_model not in ids and f"@{owner}:{stored_model}" not in ids:
+            return resolved_provider
+    return owner
 
 
 def _clean_session_model_provider(value: str | None) -> str | None:
@@ -6934,8 +6971,6 @@ def _context_length_lookup_inputs_for_model(
     if isinstance(model_cfg, dict):
         if not effective_provider:
             effective_provider = _canonical_context_provider(model_cfg.get("provider"))
-        if not effective_base_url:
-            effective_base_url = str(model_cfg.get("base_url") or "").strip()
 
     custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else None
     if not isinstance(custom_providers, list):
@@ -6956,6 +6991,16 @@ def _context_length_lookup_inputs_for_model(
                 bare_model or model_for_lookup,
             )
             break
+
+    model_provider = _canonical_context_provider(model_cfg.get("provider")) if isinstance(model_cfg, dict) else ""
+    same_model_provider = not model_provider or _providers_match_for_context(model_provider, effective_provider)
+    # An unlabelled endpoint is not evidence that an explicitly selected lane
+    # uses it. Resolve matching global URLs before custom endpoint metadata.
+    if isinstance(model_cfg, dict) and not effective_base_url and (
+        _providers_match_for_context(model_provider, effective_provider)
+        or not effective_provider
+    ):
+        effective_base_url = str(model_cfg.get("base_url") or "").strip()
 
     custom_context_length = None
     effective_api_key = str(api_key or "").strip()
@@ -6994,7 +7039,7 @@ def _context_length_lookup_inputs_for_model(
             break
 
     global_context_length = None
-    if isinstance(model_cfg, dict):
+    if isinstance(model_cfg, dict) and same_model_provider:
         cfg_default_model = str(model_cfg.get("default") or "").strip()
         raw_cfg_ctx = model_cfg.get("context_length")
         if raw_cfg_ctx is not None and (
@@ -7767,7 +7812,7 @@ def _normalize_session_model_in_place(session) -> str:
     return effective_model
 
 
-def _resolve_effective_session_model_for_display(session) -> str:
+def _resolve_effective_session_model_state_for_display(session) -> tuple[str, str | None]:
     """Resolve the model a session should display without mutating persisted state.
 
     `GET /api/session` should stay side-effect free. If a stale persisted model
@@ -7795,25 +7840,21 @@ def _resolve_effective_session_model_for_display(session) -> str:
         # the network-free minimal catalog already provides.
         prefer_cached_catalog=True,
     )
-    return effective_model or original_model
+    model_cfg = (_pp_cfg or {}).get("model") or {}
+    profile_provider = _pp_provider or (model_cfg.get("provider") if isinstance(model_cfg, dict) else None)
+    provider = _repair_foreign_session_model_provider(
+        session, requested_model=original_model, requested_provider=requested_provider,
+        resolved_model=effective_model, resolved_provider=_provider,
+        explicit_model_pick=False, profile_provider=profile_provider, profile_config=_pp_cfg,
+    )
+    return effective_model or original_model, provider
+
+
+def _resolve_effective_session_model_for_display(session) -> str:
+    return _resolve_effective_session_model_state_for_display(session)[0]
 
 def _resolve_effective_session_model_provider_for_display(session) -> str | None:
-    original_model = getattr(session, "model", None) or ""
-    requested_provider = getattr(session, "model_provider", None)
-    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(session, requested_provider)
-    _model, provider, _changed = _resolve_compatible_session_model_state(
-        original_model or None,
-        requested_provider,
-        profile_provider=_pp_provider,
-        profile_default_model=_pp_default,
-        profile_config=_pp_cfg,
-        # See _resolve_effective_session_model_for_display: same hot
-        # side-effect-free GET /api/session path; must not trigger the cold
-        # live rebuild. prefer_cached_catalog resolves from warm/disk cache
-        # or the network-free minimal catalog.
-        prefer_cached_catalog=True,
-    )
-    return provider
+    return _resolve_effective_session_model_state_for_display(session)[1]
 
 
 def _resolve_context_length_for_session_model(
@@ -12989,15 +13030,9 @@ def _handle_session_get(handler, parsed) -> bool:
             metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
         _t2 = _time.monotonic()
         if _diag: _diag.stage("t2_after_state_db_load")
-        effective_model = (
-            _resolve_effective_session_model_for_display(s)
-            if resolve_model
-            else None
-        )
-        effective_provider = (
-            _resolve_effective_session_model_provider_for_display(s)
-            if resolve_model
-            else None
+        effective_model, effective_provider = (
+            _resolve_effective_session_model_state_for_display(s)
+            if resolve_model else (None, None)
         )
         _t3 = _time.monotonic()
         if _diag: _diag.stage("t3_after_model_resolve")
@@ -15701,8 +15736,23 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(sid):
-            s.enabled_toolsets = toolsets
-            s.save()
+            # Re-fetch under the mutation lock: compression may have replaced
+            # the cached session while this request waited.
+            try:
+                s = get_session(sid)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            previous = s.enabled_toolsets
+            try:
+                from api.session_toolsets import invalidate_tool_snapshot
+
+                invalidate_tool_snapshot(s)
+                s.enabled_toolsets = toolsets
+                s.save()
+            except Exception:
+                s.enabled_toolsets = previous
+                logger.warning("Could not persist toolsets for session %s", sid, exc_info=True)
+                return bad(handler, "Could not update toolsets; retry the request", 503)
         return j(handler, {"ok": True, "enabled_toolsets": s.enabled_toolsets})
 
     if parsed.path == "/api/session/draft":
@@ -23538,6 +23588,13 @@ def start_session_turn(
         profile_config=_pp_cfg,
         prefer_cached_catalog=True,
     )
+    profile_model_cfg = (_pp_cfg or {}).get("model") or {}
+    model_provider = _repair_foreign_session_model_provider(
+        s, requested_model=requested_model, requested_provider=requested_provider,
+        resolved_model=model, resolved_provider=model_provider, explicit_model_pick=False,
+        profile_provider=_pp_provider or (profile_model_cfg.get("provider") if isinstance(profile_model_cfg, dict) else None),
+        profile_config=_pp_cfg,
+    )
     _paused_wakeup_response = None
     with _get_session_agent_lock(s.session_id):
         try:
@@ -24271,6 +24328,7 @@ def _handle_chat_start(handler, body, diag=None):
             resolved_provider=model_provider,
             explicit_model_pick=explicit_model_pick,
             profile_provider=catalog_profile_provider,
+            profile_config=_pp_cfg,
         )
         if model_provider == "moa" and gateway_chat_enabled:
             from api.config import get_effective_default_model
