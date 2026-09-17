@@ -2790,22 +2790,10 @@ def _set_streaming_hermes_home_override(profile_home: str):
     Returns ``(module, token, installed)`` so callers can restore it with the
     matching module in the inverse order.
     """
+    from api.profiles import install_profile_home_scope
     if not profile_home:
-        return None, None, False
-
-    _home_override_mod = _resolve_streaming_hermes_home_override()
-    if _home_override_mod is None:
-        return None, None, False
-
-    try:
-        _token = _home_override_mod.set_hermes_home_override(profile_home)
-        return _home_override_mod, _token, True
-    except Exception:
-        logger.debug(
-            "Failed to set streaming Hermes home override; continuing with os.environ mirror",
-            exc_info=True,
-        )
-        return None, None, False
+        raise RuntimeError("Cannot run without a resolved profile home")
+    return install_profile_home_scope(profile_home)
 
 
 def _reset_streaming_hermes_home_override(override_mod, override_token, override_installed: bool) -> None:
@@ -9048,7 +9036,6 @@ def _run_agent_streaming(
     old_session_key = None
     old_session_id = None
     old_session_platform = None
-    old_hermes_home = None
     old_profile_env = {}
     result = None
     _result_partial_pre_call_context = []
@@ -9528,7 +9515,11 @@ def _run_agent_streaming(
             _profile_home = str(_profile_home_path)
             _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
-            _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
+            _safe_profile_runtime_env = {
+                key: value for key, value in
+                filter_runtime_env_for_gateway_parity(_profile_runtime_env).items()
+                if key != "HERMES_HOME"
+            }
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
@@ -9645,7 +9636,6 @@ def _run_agent_streaming(
             old_session_id = os.environ.get('HERMES_SESSION_ID')
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
-            old_hermes_home = os.environ.get('HERMES_HOME')
             os.environ.update(_safe_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
@@ -9655,21 +9645,11 @@ def _run_agent_streaming(
             # process_complete wiring (ours-original, Option B): see
             # _build_agent_thread_env above.
             os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
-            if _profile_home:
-                os.environ['HERMES_HOME'] = _profile_home
-                # Prefer context-local Hermes-home overrides when available.
-                # In that mode, tools.skills_tool._skills_dir() and
-                # tools.skill_manager_tool._skills_dir() can resolve the active
-                # profile from get_hermes_home() and keep per-thread isolation
-                # without mutating module globals. If override installation
-                # succeeds for both modules, skip process-cache patching.
-                # If either module is static/missing/raises, the legacy path
-                # above has already snapshotted and patched under this lock.
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
-        # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
-        # reads `~/.hermes/config.yaml` via `get_hermes_home()`, which uses
-        # `os.environ['HERMES_HOME']`.  Calling it before the mutation always
+        # MUST run AFTER the context-local home binding above. Discovery reads
+        # config via get_hermes_home(), not a request-time process env mirror.
+        # Calling it before the binding previously
         # loaded the default profile's `mcp_servers`, even when the session
         # was stamped with a non-default profile.  See issue #1968.
         #
@@ -12668,8 +12648,6 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
                 if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
                 else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
-                if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
-                else: os.environ['HERMES_HOME'] = old_hermes_home
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)

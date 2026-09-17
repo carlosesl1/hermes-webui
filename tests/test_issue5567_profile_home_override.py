@@ -1,6 +1,6 @@
 """Regression test for #5567 — cross-profile HERMES_HOME race at the config reader.
 
-Root cause: `profile_env_for_background_worker` mirrors the profile's HERMES_HOME
+Historical root cause: `profile_env_for_background_worker` mirrored the profile's HERMES_HOME
 into the process-global `os.environ`, and the worker body runs outside the setup
 lock. A concurrent cross-profile worker can clobber `os.environ["HERMES_HOME"]`
 mid-body, so the agent config reader (`hermes_cli.config.get_config_path` /
@@ -16,7 +16,9 @@ Per #2321's acceptance criteria, this exercises the REAL
 `hermes_cli.config.load_config()` against a non-default profile with an
 intentional mid-body `os.environ` clobber and NO mocking of the production reader.
 
-Degrades gracefully on agents without the override (skips with a clear reason).
+Current contract (#6857): never mirror worker HERMES_HOME into process env.
+Agents without both set/reset APIs support only their launch home; cross-home
+execution fails closed. Tests needing the real override skip when unavailable.
 """
 import os
 import json
@@ -133,7 +135,7 @@ def test_graceful_degradation_resolver_is_optional():
 
 
 def test_profile_env_for_background_worker_uses_legacy_skill_module_patching(monkeypatch, tmp_path):
-    """When override support is unavailable for this run, fallback still patches skill modules."""
+    """Legacy skill patching remains usable for a process launched in this home."""
     profile_home = tmp_path / "legacy-profile-home"
     profile_home.mkdir(parents=True, exist_ok=True)
 
@@ -146,7 +148,7 @@ def test_profile_env_for_background_worker_uses_legacy_skill_module_patching(mon
     monkeypatch.setitem(sys.modules, "tools.skills_tool", fake_skill_module)
     monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", fake_skill_manager_module)
 
-    monkeypatch.setenv("HERMES_HOME", "default-home")
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
     monkeypatch.delenv("HERMES_TEST_PROFILE_ENV", raising=False)
 
     monkeypatch.setattr(profiles_api, "_hermes_home_override_available", False)
@@ -170,7 +172,7 @@ def test_profile_env_for_background_worker_uses_legacy_skill_module_patching(mon
 
     assert fake_skill_module.HERMES_HOME == "default-home"
     assert fake_skill_module.SKILLS_DIR == "default-home/skills"
-    assert os.environ.get("HERMES_HOME") == "default-home"
+    assert os.environ.get("HERMES_HOME") == str(profile_home)
     assert os.environ.get("HERMES_TEST_PROFILE_ENV") is None
 
 

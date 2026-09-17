@@ -644,11 +644,13 @@ def test_manual_compress_worker_uses_session_profile_env(monkeypatch, tmp_path, 
 
         def __init__(self, **kwargs):
             from api.config import _thread_ctx
+            from hermes_constants import get_hermes_home
 
             skill_module = sys.modules.get("tools.skills_tool")
             thread_env = getattr(_thread_ctx, "env", {})
             EnvAssertingAgent.seen_env = {
                 "HERMES_HOME": os.environ.get("HERMES_HOME"),
+                "CONTEXT_HERMES_HOME": str(get_hermes_home()),
                 "HERMES_TEST_PROFILE_ENV": os.environ.get("HERMES_TEST_PROFILE_ENV"),
                 "THREAD_HERMES_HOME": thread_env.get("HERMES_HOME"),
                 "THREAD_HERMES_TEST_PROFILE_ENV": thread_env.get("HERMES_TEST_PROFILE_ENV"),
@@ -691,7 +693,8 @@ def test_manual_compress_worker_uses_session_profile_env(monkeypatch, tmp_path, 
 
     routes._run_manual_compression_job(sid, {"session_id": sid})
     assert EnvAssertingAgent.seen_env == {
-        "HERMES_HOME": str(profile_home),
+        "HERMES_HOME": "default-home",
+        "CONTEXT_HERMES_HOME": str(profile_home),
         "HERMES_TEST_PROFILE_ENV": "work-runtime",
         "THREAD_HERMES_HOME": str(profile_home),
         "THREAD_HERMES_TEST_PROFILE_ENV": "work-runtime",

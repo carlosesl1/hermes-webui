@@ -24465,7 +24465,9 @@ def _handle_chat_sync(handler, body):
     try:
         AIAgent = require_ai_agent_class()
 
-        with CHAT_LOCK:
+        from api.profiles import profile_env_for_background_worker
+
+        with CHAT_LOCK, profile_env_for_background_worker(s, "synchronous chat", logger_override=logger):
             from api.config import (
                 resolve_model_provider,
                 resolve_custom_provider_connection,

@@ -539,23 +539,12 @@ def get_active_hermes_home() -> Path:
 
 
 # ── Cron-call profile isolation (issue: Scheduled jobs ignored active profile) ─
-# `cron.jobs` reads HERMES_HOME from os.environ (process-global) at function-
-# call time. That bypasses our per-request thread-local profile, so the
-# `/api/crons*` endpoints always returned the process-default profile's jobs.
-# This context manager swaps HERMES_HOME (and the cached module-level constants
-# in cron.jobs) for the duration of a cron call, serialized by a lock so
-# concurrent requests from different profiles don't race on the global env var.
-#
-# Thread-safety note on os.environ mutation:
-# CPython's os.environ assignment is GIL-protected at the bytecode level, but
-# multi-step read-modify-write sequences (snapshot prev → assign new → restore
-# on exit) are NOT atomic without explicit serialization. The _cron_env_lock
-# below makes the entire context-manager body run-to-completion serially, so
-# all webui access to HERMES_HOME goes through one thread at a time. Any
-# subprocess.Popen() call inside `run_job` inherits the env at fork time,
-# which is also under the lock — so child processes always see a consistent
-# (own-profile) HERMES_HOME, never a half-swapped state.
-_cron_env_lock = threading.Lock()
+# Bind the supported context-local home API without changing process env.
+# Legacy cron module constants still need serialized patch/restore. This lock
+# protects cooperating cron callers only, not unscoped readers or subprocesses;
+# children must receive an explicit profile environment. Reentrancy permits
+# nested synchronous cron scopes, not overlapping asyncio tasks on one thread.
+_cron_env_lock = threading.RLock()
 
 
 def _cron_profile_context_depth() -> int:
@@ -630,7 +619,7 @@ def install_cron_scheduler_profile_isolation() -> None:
 
     def _webui_profile_isolated_run_job(job, *args, **kwargs):
         # Manual WebUI runs already enter cron_profile_context_for_home before
-        # calling run_job. Avoid nesting the non-reentrant env lock or changing
+        # calling run_job. Avoid changing
         # the explicitly selected manual execution profile.
         if _cron_profile_context_depth() > 0:
             return original(job, *args, **kwargs)
@@ -667,9 +656,9 @@ class cron_profile_context_for_home:
     def __enter__(self):
         _cron_env_lock.acquire()
         _push_cron_profile_context_depth()
+        self._home_scope = (None, None, False)
         try:
-            self._prev_env = os.environ.get('HERMES_HOME')
-            os.environ['HERMES_HOME'] = str(self._home)
+            self._home_scope = install_profile_home_scope(self._home)
 
             # Re-patch cron.jobs module-level constants (see main context manager
             # below for the rationale).
@@ -701,18 +690,22 @@ class cron_profile_context_for_home:
                 _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
             except (ImportError, AttributeError):
                 logger.debug("cron_profile_context_for_home: cron.scheduler unavailable")
-        except Exception:
-            _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+        except BaseException:
+            try:
+                mod, token, installed = self._home_scope
+                if installed:
+                    mod.reset_hermes_home_override(token)
+            finally:
+                _pop_cron_profile_context_depth()
+                _cron_env_lock.release()
             raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
-            if self._prev_env is None:
-                os.environ.pop('HERMES_HOME', None)
-            else:
-                os.environ['HERMES_HOME'] = self._prev_env
+            mod, token, installed = self._home_scope
+            if installed:
+                mod.reset_hermes_home_override(token)
             if self._prev_cj is not None:
                 try:
                     import cron.jobs as _cj
@@ -746,14 +739,14 @@ class cron_profile_context:
     def __enter__(self):
         _cron_env_lock.acquire()
         _push_cron_profile_context_depth()
+        self._home_scope = (None, None, False)
         try:
-            self._prev_env = os.environ.get('HERMES_HOME')
             home = get_active_hermes_home()
-            os.environ['HERMES_HOME'] = str(home)
+            self._home_scope = install_profile_home_scope(home)
 
             # Re-patch cron.jobs module-level constants. They are snapshot at
             # import time (line 68-71 of cron/jobs.py) and don't participate in
-            # the module's __getattr__ lazy path, so env-var alone is not enough
+            # the module's __getattr__ lazy path, so a home override is not enough
             # for callers that reference the module constants directly.
             self._prev_cj = None
             try:
@@ -764,7 +757,7 @@ class cron_profile_context:
                 _cj.JOBS_FILE = _cj.CRON_DIR / 'jobs.json'
                 _cj.OUTPUT_DIR = _cj.CRON_DIR / 'output'
             except (ImportError, AttributeError):
-                logger.debug("cron_profile_context: cron.jobs unavailable; env-var only")
+                logger.debug("cron_profile_context: cron.jobs unavailable; home scope only")
 
             self._prev_cs = None
             try:
@@ -778,20 +771,24 @@ class cron_profile_context:
                 _cs._LOCK_DIR = home / 'cron'
                 _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
             except (ImportError, AttributeError):
-                logger.debug("cron_profile_context: cron.scheduler unavailable; env-var only")
-        except Exception:
-            _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+                logger.debug("cron_profile_context: cron.scheduler unavailable; home scope only")
+        except BaseException:
+            try:
+                mod, token, installed = self._home_scope
+                if installed:
+                    mod.reset_hermes_home_override(token)
+            finally:
+                _pop_cron_profile_context_depth()
+                _cron_env_lock.release()
             raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
-            # Restore env var
-            if self._prev_env is None:
-                os.environ.pop('HERMES_HOME', None)
-            else:
-                os.environ['HERMES_HOME'] = self._prev_env
+            # Restore the outer context-local home.
+            mod, token, installed = self._home_scope
+            if installed:
+                mod.reset_hermes_home_override(token)
 
             # Restore cron.jobs module constants
             if self._prev_cj is not None:
@@ -1134,8 +1131,8 @@ def _resolve_secret_scope_module():
 # profile worker scope eliminates the cross-profile HERMES_HOME race at the
 # reader (a config read resolves the task-local profile home even if another
 # thread clobbers os.environ mid-body) WITHOUT serializing workers or mutating
-# shared state. Resolved lazily + optionally so OLDER agents (no override symbol)
-# degrade gracefully to the pre-existing os.environ-mirror behavior — unchanged.
+# shared state. Older agents can execute only in their process home; cross-home
+# requests fail closed instead of exposing a temporary home to unscoped readers.
 _hermes_home_override_available = None
 
 
@@ -1162,6 +1159,26 @@ def _resolve_hermes_home_override():
     return None
 
 
+def install_profile_home_scope(home):
+    """Bind Hermes' supported set/reset API; never mirror home into os.environ.
+
+    Older runtimes may execute only against their existing process home. Refuse
+    cross-home work rather than using a lock that unscoped readers cannot obey.
+    Capability/setup errors propagate before the worker body is entered.
+    """
+    home = Path(home).expanduser()
+    mod = _resolve_hermes_home_override()
+    if mod is not None:
+        return mod, mod.set_hermes_home_override(str(home)), True
+    process_home = Path(os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME).expanduser()
+    if home.resolve() != process_home.resolve():
+        raise RuntimeError(
+            "This Hermes runtime lacks context-local profile homes; upgrade Hermes "
+            "or run a separate WebUI process launched with this profile's HERMES_HOME."
+        )
+    return None, None, False
+
+
 @contextmanager
 def profile_env_for_background_worker(
     session,
@@ -1181,9 +1198,7 @@ def profile_env_for_background_worker(
     log = logger_override or logger
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
-    if not profile or profile == "default":
-        yield
-        return
+    profile = profile or "default"
 
     try:
         # Lazy imports avoid a module-load cycle: streaming imports this helper.
@@ -1195,15 +1210,12 @@ def profile_env_for_background_worker(
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
         secret_env_names = _profile_secret_env_names(profile_home_path)
     except Exception:
-        log.debug(
-            "Failed to resolve profile env for %s profile %s; falling back to current env",
-            purpose,
-            profile,
-            exc_info=True,
-        )
-        yield
-        return
+        log.exception("Failed to resolve profile env for %s profile %s", purpose, profile)
+        raise
 
+    # Home is authoritative from the selected profile, never its .env file.
+    safe_runtime_env = {k: v for k, v in safe_runtime_env.items() if k != "HERMES_HOME"}
+    secret_env_names.discard("HERMES_HOME")
     thread_env = dict(safe_runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
     # Hybrid profile routing: keep the broad runtime env in WebUI's thread-local
@@ -1213,8 +1225,6 @@ def profile_env_for_background_worker(
     # narrow: serialize only setup/restore, not the whole worker body.
     skill_home_snapshot = None
     old_runtime_env: dict[str, Optional[str]] = {}
-    old_hermes_home = None
-    had_hermes_home = False
     previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
     previous_block_process_env = bool(
         getattr(_thread_ctx, "block_process_env_fallback", False)
@@ -1222,8 +1232,8 @@ def profile_env_for_background_worker(
     _scope_token = None
     _has_scope = False
     _secret_scope_mod = None
-    # #5567: context-local Hermes-home override (hermes-agent v0.18.0+). None on
-    # older agents → graceful no-op (falls back to the os.environ mirror below).
+    # Feature-detected context-local Hermes-home override. Legacy cross-home
+    # execution is rejected by install_profile_home_scope before yielding.
     _home_override_mod = None
     _home_override_token = None
     _home_override_installed = False
@@ -1246,18 +1256,9 @@ def profile_env_for_background_worker(
         # config reader (get_hermes_home -> get_config_path/load_config) resolves
         # THIS profile's home from task-local state, immune to a concurrent
         # cross-profile os.environ["HERMES_HOME"] clobber during the worker body.
-        # No-op on agents < v0.18.0 (resolver returns None) → os.environ mirror
-        # below remains the behavior, exactly as today.
-        _home_override_mod = _resolve_hermes_home_override()
-        if _home_override_mod is not None:
-            try:
-                _home_override_token = _home_override_mod.set_hermes_home_override(
-                    str(profile_home_path)
-                )
-                _home_override_installed = True
-            except Exception:
-                _home_override_token = None
-                _home_override_installed = False
+        # No HERMES_HOME process mirror, including on setup/restore failures.
+        (_home_override_mod, _home_override_token,
+         _home_override_installed) = install_profile_home_scope(profile_home_path)
 
         if scope_skill_modules:
             if _home_override_mod is not None and _home_override_installed:
@@ -1296,10 +1297,7 @@ def profile_env_for_background_worker(
                 safe_runtime_env,
                 secret_env_names=secret_env_names,
             )
-            had_hermes_home = "HERMES_HOME" in os.environ
-            old_hermes_home = os.environ.get("HERMES_HOME")
             os.environ.update(safe_runtime_env)
-            os.environ["HERMES_HOME"] = str(profile_home_path)
         yield
     finally:
         try:
@@ -1309,10 +1307,6 @@ def profile_env_for_background_worker(
                         os.environ.pop(key, None)
                     else:
                         os.environ[key] = old_value
-                if had_hermes_home:
-                    os.environ["HERMES_HOME"] = old_hermes_home or ""
-                else:
-                    os.environ.pop("HERMES_HOME", None)
                 if should_restore_skill_modules and skill_home_snapshot is not None:
                     restore_skill_home_modules(skill_home_snapshot)
         finally:
