@@ -17115,13 +17115,20 @@ def handle_post(handler, parsed) -> bool:
                 except _archive_sqlite.Error:
                     return bad(handler, "Unable to validate session owner", 503)
         except KeyError:
-            if not owner:
-                return bad(handler, "profile is required", 400)
             candidates = [row for row in get_cli_sessions(all_profiles=not _is_isolated_profile_mode())
-                          if row.get("session_id") == sid and _profiles_match(row.get("profile"), owner)]
+                          if row.get("session_id") == sid
+                          and (not owner or _profiles_match(row.get("profile"), owner))]
             if len(candidates) != 1:
                 return bad(handler, "Session owner is missing or ambiguous", 404)
             cli_meta = candidates[0]
+            stored_owner = cli_meta.get("profile") or "default"
+            if _is_isolated_profile_mode() and not _profiles_match(stored_owner, get_active_profile_name()):
+                return bad(handler, "Session not found", 404)
+            # Legacy callers omit profile. Infer it only from an unambiguous,
+            # visible authoritative row, never from the process active profile.
+            if not owner and not _session_visible_to_active_profile(stored_owner, handler):
+                return bad(handler, "profile is required", 400)
+            owner = stored_owner
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             # Delegated subagent children (#5307) are view-only and owned by the

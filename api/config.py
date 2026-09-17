@@ -1194,6 +1194,8 @@ _PROVIDER_DISPLAY = {
     "ollama-cloud": "Ollama Cloud",
     "opencode-zen": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
+    # Built-in even when the optional core provider registry is unavailable.
+    "kilocode": "Kilo Code",
     "lmstudio": "LM Studio",
     "mistralai": "Mistral",
     "qwen": "Qwen",

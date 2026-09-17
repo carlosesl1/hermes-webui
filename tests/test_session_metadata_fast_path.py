@@ -1,4 +1,6 @@
 import re
+
+import pytest
 from pathlib import Path
 
 
@@ -9,12 +11,39 @@ def test_messages_zero_skips_effective_model_resolution():
     src = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
     assert re.search(
-        r"effective_model\s*=\s*\(\s*"
-        r"_resolve_effective_session_model_for_display\(s\)\s*"
-        r"if resolve_model\s*else None\s*\)",
+        r"effective_model,\s*effective_provider\s*=\s*\(\s*"
+        r"_resolve_effective_session_model_state_for_display\(s\)\s*"
+        r"if resolve_model\s*else \(None, None\)\s*\)",
         src,
     ), "messages=0 metadata requests must not resolve the model catalog"
     assert 'resolve_model_default = "1" if load_messages else "0"' in src
+
+
+@pytest.mark.parametrize("query", ["messages=0", "messages=0&resolve_model=0"])
+def test_metadata_get_never_reads_model_catalog(monkeypatch, query):
+    from urllib.parse import urlparse
+    from api import config, models, routes
+    from tests.test_media_message_snapshots import _FakeHandler
+
+    session = models.Session(session_id="metadata-fast", profile="default", model="saved-model")
+    session.context_length = 32768
+    monkeypatch.setattr(routes, "get_session", lambda *a, **kw: session)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_metadata_only_message_summary", lambda *a, **kw: {
+        "message_count": 0, "last_message_at": 0})
+    def forbidden(*a, **kw):
+        pytest.fail("metadata-only GET must not resolve or rebuild the model catalog")
+    monkeypatch.setattr(routes, "_resolve_effective_session_model_state_for_display", forbidden)
+    monkeypatch.setattr(routes, "get_available_models", forbidden)
+    monkeypatch.setattr(config, "get_available_models", forbidden)
+    monkeypatch.setattr(config, "_invoke_models_rebuild", forbidden)
+    handler = _FakeHandler()
+    routes._handle_session_get(handler, urlparse("/api/session?session_id=metadata-fast&" + query))
+    assert handler.status == 200
+    import json
+    payload = json.loads(bytes(handler.body))
+    assert payload["session"]["model"] == "saved-model"
+    assert payload["session"]["messages"] == []
 
 
 def test_full_message_load_updates_viewed_count_after_metadata_fast_path():

@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
+import sys
 
 import api.routes as routes
 
@@ -92,6 +93,19 @@ def test_poisoned_pair_repairs_at_chat_start(monkeypatch, tmp_path):
     assert session.model == "kilo/minimax/minimax-m3"
     assert session.model_provider == "kilocode"
     assert catalog_calls == [True]
+
+
+@pytest.mark.parametrize("owner,expected", [
+    ("kilocode", "kilocode"), ("unregistered-route", "openrouter"),
+    ("custom:unconfigured", "openrouter"),
+])
+def test_catalog_owner_without_optional_core_registry(monkeypatch, owner, expected):
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", None)
+    session = _session(provider="openrouter")
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *a: (None, None, {}))
+    monkeypatch.setattr(routes, "get_available_models", lambda **kw: _catalog(
+        _group("openrouter", "other-model"), _group(owner, session.model)))
+    assert _repair(session, None) == expected
 
 
 def test_catalog_equivalent_owner_repairs_poisoned_pair(monkeypatch):

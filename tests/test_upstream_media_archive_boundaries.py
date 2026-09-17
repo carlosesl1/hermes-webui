@@ -152,8 +152,13 @@ def test_archive_isolated_rejects_foreign_before_lookup(monkeypatch):
     assert h.status == 404
 
 
-@pytest.mark.parametrize("duplicates,owner,status", [(1, "beta", 200), (2, "beta", 404), (1, "alpha", 404), (1, None, 400)])
-def test_archive_db_only_route_owner_validation(tmp_path, monkeypatch, duplicates, owner, status):
+@pytest.mark.parametrize("duplicates,owner,active,isolated,status", [
+    (1, "beta", "alpha", False, 200), (2, "beta", "alpha", False, 404),
+    (1, "alpha", "alpha", False, 404), (1, None, "alpha", False, 400),
+    (1, None, "beta", False, 200), (1, None, "beta", True, 200),
+    (2, None, "beta", False, 404), (1, None, "alpha", True, 404),
+])
+def test_archive_db_only_route_owner_validation(tmp_path, monkeypatch, duplicates, owner, active, isolated, status):
     from api import profiles
     db = tmp_path / "state.db"
     with sqlite3.connect(db) as conn:
@@ -165,8 +170,9 @@ def test_archive_db_only_route_owner_validation(tmp_path, monkeypatch, duplicate
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", sd / "_index.json")
     monkeypatch.setattr(models, "get_last_workspace", lambda: str(tmp_path))
     monkeypatch.setattr(routes, "get_last_workspace", lambda: str(tmp_path))
-    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "alpha")
-    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: active)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: active)
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: isolated)
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda profile: tmp_path)
     def missing(sid):
         raise KeyError(sid)
