@@ -5867,7 +5867,8 @@ def _deduplicate_context_messages(messages):
         # text but different durable ``api_content`` sidecars are distinct turns.
         # Keep the display identity unchanged so ordinary transcript dedup still
         # collapses the same visible row.
-        key = _message_replay_key(msg)
+        from api.models import _message_occurrence_key
+        key = (_message_replay_key(msg), _message_occurrence_key(msg))
         if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
             user_exact_key = (
                 key,
@@ -6324,15 +6325,8 @@ def _messages_have_prefix(messages, prefix, *, key_fn=None):
 
 
 def _message_replay_key(msg):
-    """Strict occurrence key for unpaired replay/global history de-duplication.
-
-    Full-history prefix alignment uses _cross_source_replay_match instead: a
-    projected copy can lack provenance, but equal text is not occurrence identity.
-    """
-    from api.models import _message_occurrence_key
+    """Return a stable comparison key for replay/overlap de-duplication."""
     identity = _message_identity(msg)
-    if isinstance(msg, dict):
-        identity = (*identity, _message_occurrence_key(msg)) if identity is not None else (_message_occurrence_key(msg),)
     # ``api_content`` is a provider-facing replay sidecar.  It must participate
     # in context/replay overlap identity or two same-visible turns can collapse
     # before the Agent sees the original wire bytes.  Keep synthetic/adjacent
@@ -6373,7 +6367,11 @@ def _strip_replayed_prefix(existing_messages, candidates):
     for overlap in range(max_overlap, 0, -1):
         left = [_message_replay_key(m) for m in existing_messages[-overlap:]]
         right = [_message_replay_key(m) for m in candidates[:overlap]]
-        if left == right:
+        from api.models import _cross_source_replay_match
+        if left == right and all(
+            _cross_source_replay_match(a, b, allow_legacy=overlap >= 3)
+            for a, b in zip(existing_messages[-overlap:], candidates[:overlap])
+        ):
             return candidates[overlap:]
     return candidates
 
@@ -6403,8 +6401,8 @@ def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
     )
     if normalized_previous_api_content != normalized_candidate_api_content:
         return False
-    from api.models import _message_occurrence_key
-    if _message_occurrence_key(previous_msg) != _message_occurrence_key(candidate_msg):
+    from api.models import _message_private_identity_compatible
+    if not _message_private_identity_compatible(previous_msg, candidate_msg):
         return False
     previous_text = " ".join(_message_text(previous_msg.get('content', '')).split())
     candidate_text = " ".join(_message_text(candidate_msg.get('content', '')).split())
@@ -6428,6 +6426,7 @@ def _strip_replayed_context_items(existing_messages, candidates):
     existing_large = [m for m in existing_messages if isinstance(m, dict)]
     cleaned = []
     idx = 0
+    from api.models import _message_private_identity_compatible
     min_block = 3
     while idx < len(candidates):
         msg = candidates[idx]
@@ -6442,6 +6441,7 @@ def _strip_replayed_context_items(existing_messages, candidates):
                 idx + length < len(candidate_keys)
                 and start + length < len(existing_keys)
                 and candidate_keys[idx + length] == existing_keys[start + length]
+                and _message_private_identity_compatible(candidates[idx + length], existing_messages[start + length])
             ):
                 length += 1
             if length > best:
