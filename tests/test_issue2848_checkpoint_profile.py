@@ -68,7 +68,8 @@ def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
     def fake_save(self, *args, **kwargs):
         captured["kwargs"] = kwargs
         captured["thread_env"] = dict(getattr(config._thread_ctx, "env", {}) or {})
-        captured["env_hermes_home"] = os.environ.get("HERMES_HOME")
+        from hermes_constants import get_hermes_home
+        captured["env_hermes_home"] = str(get_hermes_home())
 
     def patch_skill_home_modules(*_):
         patch_calls.append({"patched": True})

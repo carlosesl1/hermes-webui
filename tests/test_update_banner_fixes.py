@@ -1642,6 +1642,7 @@ class TestUpdateSummaryRouteModelSelection:
         import api.profiles as profiles
         import api.routes as routes
         import api.updates as updates
+        from hermes_constants import get_hermes_home
 
         class FakeHandler:
             def __init__(self, payload):
@@ -1681,7 +1682,7 @@ class TestUpdateSummaryRouteModelSelection:
         def fake_resolve_model_provider(model):
             thread_env = getattr(cfg._thread_ctx, 'env', {})
             captured['model_resolution_env'] = {
-                'HERMES_HOME': os.environ.get('HERMES_HOME'),
+                'HERMES_HOME': str(get_hermes_home()),
                 'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
                 'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
                 'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),
@@ -1722,7 +1723,7 @@ class TestUpdateSummaryRouteModelSelection:
         def fake_get_text_auxiliary_client(task, main_runtime=None):
             thread_env = getattr(cfg._thread_ctx, 'env', {})
             captured['aux_env'] = {
-                'HERMES_HOME': os.environ.get('HERMES_HOME'),
+                'HERMES_HOME': str(get_hermes_home()),
                 'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
                 'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
                 'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),

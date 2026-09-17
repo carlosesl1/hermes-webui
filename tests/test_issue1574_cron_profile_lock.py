@@ -37,6 +37,11 @@ def _install_fake_cron(monkeypatch, run_job, events):
 def _write_spawn_fake_agent(root: Path, *, run_job_body: str):
     root.mkdir(parents=True, exist_ok=True)
     (root / "run_agent.py").write_text("", encoding="utf-8")
+    # Spawned workers do not inherit the parent pytest module table.
+    (root / "hermes_constants.py").write_text(
+        (Path(__file__).parent / "contextual_home_runtime.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     cron_dir = root / "cron"
     cron_dir.mkdir(parents=True, exist_ok=True)
     (cron_dir / "__init__.py").write_text("", encoding="utf-8")

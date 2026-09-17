@@ -28,16 +28,16 @@ def _line_of(pattern: str) -> int:
     raise AssertionError(f"pattern not found in api/streaming.py: {pattern!r}")
 
 
-def test_discover_mcp_tools_called_after_hermes_home_mutation():
+def test_discover_mcp_tools_called_after_contextual_home_binding():
     """The fix for #1968: `discover_mcp_tools()` must execute AFTER the
-    `HERMES_HOME = _profile_home` assignment, otherwise non-default profile
+    context-local home binding, otherwise non-default profile
     MCP servers are never discovered.
     """
-    home_set_line = _line_of(r"os\.environ\['HERMES_HOME'\]\s*=\s*_profile_home")
+    home_set_line = _line_of(r"_set_streaming_hermes_home_override\(_profile_home\)")
     discover_call_line = _line_of(r"discover_mcp_tools\(\)\s*$")
     assert discover_call_line > home_set_line, (
         f"discover_mcp_tools() at line {discover_call_line} must be AFTER the "
-        f"HERMES_HOME mutation at line {home_set_line} (issue #1968). "
+        f"contextual home binding at line {home_set_line} (issue #1968). "
         "Otherwise non-default profile MCP servers never load."
     )
 

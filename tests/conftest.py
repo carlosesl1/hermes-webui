@@ -1146,6 +1146,26 @@ def _invalidate_models_cache_after_test():
         pass
 
 
+# Unit CI deliberately runs without an installed Hermes checkout. Supply only
+# its contextual-home contract; never replace a discoverable real runtime or
+# repair an explicit legacy/absent-runtime module installed by an individual test.
+import importlib.util as _importlib_util
+if "hermes_constants" not in sys.modules and _importlib_util.find_spec("hermes_constants") is None:
+    _spec = _importlib_util.spec_from_file_location(
+        "hermes_constants", TESTS_DIR / "contextual_home_runtime.py"
+    )
+    _constants = _importlib_util.module_from_spec(_spec)
+    _spec.loader.exec_module(_constants)
+    sys.modules["hermes_constants"] = _constants
+
+
+@pytest.fixture(autouse=True)
+def _reset_home_override_capability(monkeypatch):
+    # Capability misses in legacy-runtime tests must not poison later tests.
+    from api import profiles
+    monkeypatch.setattr(profiles, "_hermes_home_override_available", None)
+
+
 # ── Per-test hermes_cli module integrity guard ───────────────────────────────
 # Several tests simulate "hermes_cli unavailable / CI without the package" by
 # swapping sys.modules['hermes_cli'] for a stub whose __path__ is [] (e.g.

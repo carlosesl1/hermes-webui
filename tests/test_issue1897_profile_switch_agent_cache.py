@@ -113,14 +113,16 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
             self.tool_progress_callback = kwargs.get("tool_progress_callback")
             self.reasoning_callback = kwargs.get("reasoning_callback")
             self.clarify_callback = kwargs.get("clarify_callback")
-            home = Path(os.environ["HERMES_HOME"])
+            from hermes_constants import get_hermes_home
+            home = get_hermes_home()
             self.constructed_home = str(home)
             self._cached_system_prompt = (home / "SOUL.md").read_text(encoding="utf-8")
             constructed_agents.append(self)
 
         def run_conversation(self, **kwargs):
             prompts_used_for_runs.append(self._cached_system_prompt)
-            homes_seen_during_runs.append(os.environ.get("HERMES_HOME"))
+            from hermes_constants import get_hermes_home
+            homes_seen_during_runs.append(str(get_hermes_home()))
             history = list(kwargs.get("conversation_history") or [])
             return {
                 "messages": history

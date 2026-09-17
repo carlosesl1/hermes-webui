@@ -1172,7 +1172,11 @@ def install_profile_home_scope(home):
     mod = _resolve_hermes_home_override()
     if mod is not None:
         return mod, mod.set_hermes_home_override(str(home)), True
-    process_home = Path(os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME).expanduser()
+    # A cached WebUI base is not proof of the legacy runtime's current home.
+    # In particular an unset env must not authorize a sibling profile merely
+    # because that missing directory was selected as the WebUI default.
+    from api.paths import _platform_default_hermes_home
+    process_home = Path(os.environ.get("HERMES_HOME") or _platform_default_hermes_home()).expanduser()
     if home.resolve() != process_home.resolve():
         raise RuntimeError(
             "This Hermes runtime lacks context-local profile homes; upgrade Hermes "

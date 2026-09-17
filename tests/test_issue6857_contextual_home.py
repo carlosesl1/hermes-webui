@@ -89,6 +89,25 @@ def test_legacy_runtime_fails_closed_cross_home(homes, monkeypatch):
         assert os.environ["HERMES_HOME"] == str(paths["default"])
 
 
+def test_absent_runtime_still_rejects_cross_home(homes, monkeypatch):
+    import sys
+    paths, _ = homes
+    monkeypatch.setitem(sys.modules, "hermes_constants", None)
+    monkeypatch.setattr(profiles, "_hermes_home_override_available", None)
+    with pytest.raises(RuntimeError, match="context-local"):
+        profiles.install_profile_home_scope(paths["alpha"])
+    assert profiles.install_profile_home_scope(paths["default"]) == (None, None, False)
+
+
+def test_legacy_missing_process_home_does_not_trust_webui_default(homes, monkeypatch):
+    paths, _ = homes
+    monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: None)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", paths["alpha"])
+    monkeypatch.delenv("HERMES_HOME")
+    with pytest.raises(RuntimeError, match="context-local"):
+        profiles.install_profile_home_scope(paths["alpha"])
+
+
 def test_streaming_and_cron_use_same_scope(homes):
     from api.streaming import (
         _set_streaming_hermes_home_override, _reset_streaming_hermes_home_override,
