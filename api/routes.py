@@ -16694,6 +16694,10 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
+        if "auto_archive_days" in body:
+            days = body["auto_archive_days"]
+            if type(days) is not int or not 0 <= days <= 3650:
+                return bad(handler, "auto_archive_days must be an integer from 0 to 3650 (0 disables)", 400)
         from api.auth import (
             create_session,
             get_password_hash,
@@ -17083,6 +17087,8 @@ def handle_post(handler, parsed) -> bool:
                 s.platform = cli_meta.get("platform")
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
+            if not s.archived:
+                s.auto_archive_restored_at = time.time()
             s.save(touch_updated_at=False)
         publish_session_list_changed(
             "session_archive",
@@ -28526,6 +28532,7 @@ def _handle_session_import(handler, body):
         profile=get_active_profile_name(),
     )
     s.pinned = body.get("pinned", False)
+    s.imported = True  # provenance: never auto-archive imported JSON histories
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)

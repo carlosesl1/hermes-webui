@@ -9033,9 +9033,76 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
     : 'No override';
 }
 
+// Auto-archive is deliberately isolated from Preferences autosave and Save All.
+// A draft must never enable a global housekeeping policy without an explicit save.
+let _autoArchiveLoaded = false;
+let _autoArchiveSaving = false;
+function _autoArchiveStatus(key) {
+  const status = $('settingsAutoArchiveStatus');
+  if (status) status.textContent = key ? t(key) : '';
+}
+function _hydrateAutoArchive(settings) {
+  const value = settings.auto_archive_days ?? 0;
+  if (!Number.isInteger(value) || value < 0 || value > 3650) {
+    _autoArchiveStatus('auto_archive_load_error');
+    return;
+  }
+  const select = $('settingsAutoArchive');
+  if (!select) return;
+  select.value = [0, 7, 30, 90].includes(value) ? String(value) : 'custom';
+  $('settingsAutoArchiveDays').value = value > 0 ? String(value) : '';
+  _autoArchiveLoaded = true;
+  select.disabled = false;
+  $('settingsAutoArchiveSave').disabled = false;
+  changeAutoArchiveSetting(false);
+}
+function changeAutoArchiveSetting(dirty = true) {
+  const custom = $('settingsAutoArchive').value === 'custom';
+  $('settingsAutoArchiveCustom').hidden = !custom;
+  $('settingsAutoArchiveDays').disabled = !custom || !_autoArchiveLoaded || _autoArchiveSaving;
+  $('settingsAutoArchiveDays').removeAttribute('aria-invalid');
+  _autoArchiveStatus(dirty ? 'auto_archive_unsaved' : '');
+}
+async function saveAutoArchiveSetting() {
+  if (!_autoArchiveLoaded || _autoArchiveSaving) return;
+  const select = $('settingsAutoArchive');
+  const days = $('settingsAutoArchiveDays');
+  const raw = select.value === 'custom' ? days.value : select.value;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isInteger(value) || value > 3650 ||
+      (select.value === 'custom' ? value < 1 : ![0, 7, 30, 90].includes(value))) {
+    days.setAttribute('aria-invalid', 'true');
+    _autoArchiveStatus('auto_archive_invalid');
+    days.focus();
+    return;
+  }
+  _autoArchiveSaving = true;
+  select.disabled = days.disabled = $('settingsAutoArchiveSave').disabled = true;
+  _autoArchiveStatus('auto_archive_saving');
+  try {
+    await _enqueueSettingsPost({method:'POST', body:JSON.stringify({auto_archive_days:value}), retries:0});
+    const saved = await api('/api/settings');
+    if (saved.auto_archive_days !== value) throw new Error('Auto-archive readback mismatch');
+    _autoArchiveStatus('auto_archive_saved');
+  } catch (_) {
+    _autoArchiveStatus('auto_archive_error');
+  } finally {
+    _autoArchiveSaving = false;
+    select.disabled = $('settingsAutoArchiveSave').disabled = false;
+    days.disabled = select.value !== 'custom';
+  }
+}
+
 async function loadSettingsPanel(){
+  _autoArchiveLoaded = false;
+  if ($('settingsAutoArchive')) {
+    $('settingsAutoArchive').disabled = true;
+    $('settingsAutoArchiveDays').disabled = true;
+    $('settingsAutoArchiveSave').disabled = true;
+  }
   try{
     const settings=await api('/api/settings');
+    _hydrateAutoArchive(settings);
     checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
@@ -9758,6 +9825,7 @@ async function loadSettingsPanel(){
     loadExtensionsPanel(); // load extension diagnostics in background
     switchSettingsSection(_settingsSection);
   }catch(e){
+    if (!_autoArchiveLoaded) _autoArchiveStatus('auto_archive_load_error');
     showToast(t('settings_load_failed')+e.message);
   }
 }

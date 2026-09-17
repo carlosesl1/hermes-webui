@@ -13,6 +13,23 @@ import pytest
 
 
 NEW_COPY_FALLBACK_KEYS = {
+    "auto_archive_label",
+    "auto_archive_disabled",
+    "auto_archive_7",
+    "auto_archive_30",
+    "auto_archive_90",
+    "auto_archive_custom",
+    "auto_archive_days",
+    "auto_archive_description",
+    "auto_archive_restore",
+    "auto_archive_save",
+    "auto_archive_saving",
+    "auto_archive_saved",
+    "auto_archive_unsaved",
+    "auto_archive_invalid",
+    "auto_archive_error",
+    "auto_archive_load_error",
+
     "background_activity_title",
     "background_activity_running",
     "background_activity_available",

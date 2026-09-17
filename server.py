@@ -691,17 +691,10 @@ def main() -> None:
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
 
-    # ctl.sh stops the WebUI with SIGTERM. Python's default SIGTERM handler
-    # terminates the process WITHOUT unwinding the try/finally around
-    # serve_forever(), so drain_all_on_shutdown() (which flushes in-flight
-    # fire-and-forget memory commits) would never run on the normal managed
-    # stop. Install a handler that requests an orderly shutdown so
-    # serve_forever() returns and the existing `finally` block drains cleanly.
-    #
-    # httpd.shutdown() blocks until serve_forever() has exited and MUST NOT be
-    # called from the thread running serve_forever() (it would deadlock), so we
-    # dispatch it from a short-lived helper thread. The handler is idempotent
-    # and guards against double-shutdown (e.g. repeated SIGTERM/SIGINT).
+    # SIGTERM must unwind serve_forever's finally to flush lifecycle commits.
+    # Request orderly shutdown on a helper thread: httpd.shutdown() blocks
+    # until serve_forever exits and would deadlock on that same thread.
+    # The handler is idempotent for repeated SIGTERM/SIGINT (ctl.sh/Ctrl-C).
     _shutdown_requested = threading.Event()
 
     def _request_shutdown(signum, _frame):
@@ -720,9 +713,13 @@ def main() -> None:
     except (ValueError, OSError):
         logger.debug("Could not install shutdown signal handlers", exc_info=True)
 
+    from api.session_auto_archive import AutoArchiveWorker
+    auto_archive_worker = AutoArchiveWorker()
     try:
+        auto_archive_worker.start()  # bound server; first sweep waits 60 seconds
         httpd.serve_forever()
     finally:
+        auto_archive_worker.stop()
         httpd.server_close()
         _log_shutdown_audit()
         try:
