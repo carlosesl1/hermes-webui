@@ -1,3 +1,85 @@
+// Done carries a raw-coordinate preview, not replacement/full-history authority.
+function _restoreSettlementPreview(old, row){
+  if(typeof old==='string' && typeof row==='string' && old.startsWith(row)) return old;
+  if(Array.isArray(old)&&Array.isArray(row)&&old.length===row.length)
+    return row.map((part,i)=>_restoreSettlementPreview(old[i],part));
+  if(old&&row&&typeof old==='object'&&typeof row==='object'&&!Array.isArray(old)&&!Array.isArray(row)){
+    const result={...old,...row};
+    for(const key of Object.keys(row)) result[key]=_restoreSettlementPreview(old[key],row[key]);
+    return result;
+  }
+  return row;
+}
+function _mergeSettlementWindow(previous, incoming, oldOffset=0, sameSession=true, previousTools=[]){
+  if(incoming?._settlement_window!=='tail_v1') return incoming;
+  const next={...incoming};
+  const start=Number(incoming._messages_offset)||0;
+  const rows=incoming.messages||[];
+  let offset=start;
+  const restored=rows.map((row,i)=>{
+    const old=sameSession?previous[start-oldOffset+i]:null;
+    const compatible=old&&old.role===row?.role
+      && (!old._ts||!row._ts||old._ts===row._ts)
+      && ((!old.id&&!row.id)||old.id===row.id);
+    if(!row?._content_truncated||!compatible) return row;
+    if(typeof old.content==='string'&&typeof row.content==='string'&&!old.content.startsWith(row.content)) return row;
+    const full=_restoreSettlementPreview(old,row);
+    if(typeof full.content==='string'&&full.content.length>String(row.content||'').length)
+      full._preview_content_truncated=false;
+    return full;
+  });
+  let messages=restored;
+  next._settlement_gap=false;
+  if(sameSession && oldOffset<=start && oldOffset+previous.length>=start){
+    const prefix=previous.slice(0,start-oldOffset);
+    messages=prefix.concat(restored);
+    offset=oldOffset;
+  }
+  if(sameSession && oldOffset+previous.length<start){
+    next.messages=previous;next._messages_offset=oldOffset;
+    next._messages_truncated=oldOffset>0;next.has_more=oldOffset>0;next._settlement_gap=true;
+    next.tool_calls=previousTools;
+    return next;
+  }
+  // A replayed preview cannot delete newer rows already loaded by this pane.
+  const incomingEnd=start+rows.length;
+  if(sameSession&&incomingEnd>=oldOffset&&incomingEnd<oldOffset+previous.length){
+    messages=messages.concat(previous.slice(incomingEnd-oldOffset));
+    next.message_count=Math.max(Number(next.message_count)||0,oldOffset+previous.length);
+  }
+  next.messages=messages;next._messages_offset=offset;
+  next._messages_truncated=offset>0;next.has_more=offset>0;
+  const retainedTools=sameSession?previousTools.filter(tc=>Number.isInteger(tc.assistant_msg_idx)&&tc.assistant_msg_idx+oldOffset<start)
+    .map(tc=>({...tc,assistant_msg_idx:tc.assistant_msg_idx+oldOffset-offset})):[];
+  next.tool_calls=retainedTools.concat((incoming.tool_calls||[]).map(tc=>({...tc,assistant_msg_idx:tc.assistant_msg_idx-offset})));
+  return next;
+}
+
+// A long tool-only turn may leave a gap between the loaded range and done tail.
+// Fill only that gap with bounded cursor pages, never reload the whole history.
+async function _completeSettlementWindow(incoming, sid){
+  if(incoming?._settlement_window!=='tail_v1'||S.session?.session_id!==sid||incoming.session_id!==sid) return;
+  const generation=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
+  const ownerStream=S.activeStreamId;
+  const stillOwned=()=>S.session?.session_id===sid && S.activeStreamId===ownerStream
+    && (generation===null||_loadSessionGeneration===generation);
+  let before=Number(incoming._messages_offset)||0;
+  const end=(typeof _oldestIdx==='number'?_oldestIdx:0)+(S.messages||[]).length;
+  const suffix=[];
+  const cards=[];
+  while(before>end){
+    const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=30&msg_boundary=1&msg_before=${before}`);
+    if(!stillOwned()) return;
+    const page=data?.session;
+    const start=Number(page?._messages_offset);
+    if((page?.session_id&&page.session_id!==sid)||!Number.isInteger(start)||start<0||start>=before||start+(page.messages||[]).length!==before) throw new Error('Incomplete settlement page');
+    suffix.unshift(...page.messages);
+    cards.unshift(...(page.tool_calls||[]).map(tc=>({...tc,assistant_msg_idx:tc.assistant_msg_idx+start})));
+    before=start;
+  }
+  if(suffix.length){incoming.messages=suffix.concat(incoming.messages);incoming.tool_calls=cards.concat(incoming.tool_calls||[]);incoming._messages_offset=before;}
+}
+
 function _markSessionViewed(sid, messageCount) {
   if(typeof _setSessionViewedCount!=='function' || !sid) return;
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
@@ -6126,7 +6208,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
-      const _finishDone=()=>{
+      const _doneLoadGeneration=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
+      const _finishDone=async()=>{
+        try{await _completeSettlementWindow(_doneData.session,activeSid);}
+        catch(error){console.warn('Settlement gap needs explicit transcript reload',error);}
+        if((_doneLoadGeneration!==null&&_loadSessionGeneration!==_doneLoadGeneration)
+            || _bailOutOfTerminalEventsFromStaleStream(source)){
+          _scheduleAnchorRegistryCleanup();_closeSource(source);return;
+        }
+
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
         // can reintroduce a stale thinking card or duplicate content.
@@ -6199,10 +6289,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          d.session=_mergeSettlementWindow(S.messages||[],d.session,typeof _oldestIdx==='number'?_oldestIdx:0,S.session?.session_id===d.session.session_id,S.toolCalls||[]);
+          S.session={...S.session,...d.session};S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          if(d.session._settlement_window==='tail_v1') delete S.session.regeneration_revision;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
-          S.messages=_filterRecoveryControlMessages(S.messages || []);
+          // Keep raw coordinates for later tail merges; the renderer already
+          // hides recovery controls without deleting their transcript slots.
+          if(d.session._settlement_window!=='tail_v1') S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
           if(S.session&&S.session.session_id){
@@ -6230,7 +6324,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
-          lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
+          lastAsst=d.session._settlement_gap?null:[...S.messages].reverse().find(m=>m.role==='assistant');
           // Persist reasoning trace for Worklog Thinking Cards; normal transcript
           // rendering keeps provider reasoning out of the final answer.
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
@@ -6295,7 +6389,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               }
             }
           }
-          _attachProjectedAnchorSceneToLastAssistant(S.messages);
+          if(!d.session._settlement_gap) _attachProjectedAnchorSceneToLastAssistant(S.messages);
           const hasMessageToolMetadata=S.messages.some(m=>{
             if(!m||m.role!=='assistant') return false;
             const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;

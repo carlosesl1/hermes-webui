@@ -142,6 +142,9 @@ def get_stream_runtime_snapshot() -> dict[str, object]:
     return result
 
 
+from api.render_payload import bounded_settlement_session
+
+
 def _session_payload_with_full_messages(session, *, tool_calls=None):
     """Return compact session metadata plus the embedded full transcript.
 
@@ -12587,7 +12590,7 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
-                raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
+                raw_session = bounded_settlement_session(s, tool_calls=tool_calls)
                 _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
@@ -12905,7 +12908,7 @@ def _run_agent_streaming(
                                     s.pending_user_source = None
                                     s.save()
                                     _done_session_payload = redact_session_data(
-                                        _session_payload_with_full_messages(
+                                        bounded_settlement_session(
                                             s, tool_calls=s.tool_calls
                                         )
                                     )

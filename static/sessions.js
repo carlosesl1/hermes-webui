@@ -3892,6 +3892,7 @@ async function _ensureAllMessagesLoaded(force = false) {
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
+      delete S.session._settlement_gap;
       if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {
         S.session.regeneration_revision = data.session.regeneration_revision;
       } else {
@@ -3959,7 +3960,7 @@ function syncFullTranscriptPreview(){
   const inner=$('msgInner');
   if(!inner) return;
   let notice=$('fullTranscriptPreview');
-  const clipped=(S.messages||[]).some(m=>m&&m._content_truncated)
+  const clipped=!!S.session?._settlement_gap || (S.messages||[]).some(m=>m&&m._content_truncated)
     || (S.session?.tool_calls||[]).some(tc=>tc&&tc._content_truncated);
   if(!S.session||!clipped){if(notice) notice.remove();return;}
   const sid=S.session.session_id;

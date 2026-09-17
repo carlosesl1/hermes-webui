@@ -1428,8 +1428,8 @@ def _run_gateway_chat_streaming(
                 session_id,
                 goal_exc,
             )
-        from api.streaming import _session_payload_with_full_messages
-        gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
+        from api.render_payload import bounded_settlement_session
+        gateway_session_payload = bounded_settlement_session(s, tool_calls=[])
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:
