@@ -6370,7 +6370,7 @@ def _strip_replayed_prefix(existing_messages, candidates):
         from api.models import _cross_source_replay_match
         if left == right and all(
             _cross_source_replay_match(a, b, allow_legacy=overlap >= 3)
-            for a, b in zip(existing_messages[-overlap:], candidates[:overlap])
+            for a, b in zip(existing_messages[-overlap:], candidates[:overlap], strict=True)
         ):
             return candidates[overlap:]
     return candidates
