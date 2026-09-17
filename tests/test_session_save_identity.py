@@ -171,9 +171,10 @@ def test_draft_never_serializes_or_parses_history(store, monkeypatch):
         return original(value, *args, **kwargs)
     def no_parse(*args, **kwargs):
         pytest.fail('draft persistence must not parse the transcript')
-    monkeypatch.setattr(store.json, 'dumps', dumps)
-    monkeypatch.setattr(store.json, 'loads', no_parse)
-    stub.save_draft({'text': 'typing'})
+    with monkeypatch.context() as local:
+        local.setattr(store.json, 'dumps', dumps)
+        local.setattr(store.json, 'loads', no_parse)
+        stub.save_draft({'text': 'typing'})
     assert s.path.read_bytes() == before
     assert stub.updated_at == s.updated_at
 

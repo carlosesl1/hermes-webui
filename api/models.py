@@ -9233,7 +9233,7 @@ def _message_occurrence_key(message):
     return ('unidentified', id(message))
 
 
-def _cross_source_replay_match(target, source, *, allow_legacy=False):
+def _cross_source_replay_match(target, source, *, allow_legacy=False, content_equal=None):
     """Pair rows from two ordered histories, never deduplicate a history by text.
 
     Missing provenance can be tolerated for an explicitly aligned full-history
@@ -9247,9 +9247,11 @@ def _cross_source_replay_match(target, source, *, allow_legacy=False):
     for field in ('_source', '_active_turn_token'):
         if target.get(field) and source.get(field) and target[field] != source[field]:
             return False
-    if _session_message_content_key(target) != _session_message_content_key(
-        source, normalize_workspace_prefix=True
-    ):
+    if content_equal is None:
+        content_equal = _session_message_content_key(target) == _session_message_content_key(
+            source, normalize_workspace_prefix=True
+        )
+    if not content_equal:
         return False
     if target.get('tool_calls') != source.get('tool_calls'):
         return False
@@ -10100,13 +10102,19 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     if (best_len < 3 and sidecar_context[best_offset].get('role') == 'user'
             and not allow_single_row_prefix
             and not _cross_source_replay_match(sidecar_context[best_offset], state_messages[0])):
-        return state_messages
+        # A timestamp-enriched full-history prefix can be paired; a bare equal
+        # user/assistant pair alone is ambiguous and must not erase a new turn.
+        local_ts, local_valid = _message_exact_timestamp_details(sidecar_context[best_offset])
+        state_ts, state_valid = _message_exact_timestamp_details(state_messages[0])
+        if not (local_valid and state_valid and local_ts is None and state_ts is not None
+                and len(state_messages) > best_len):
+            return state_messages
 
     # Drop only rows that can be aligned with the remaining sidecar context in
     # order. This still tolerates stale state-only rows between mirrored context
     # rows, but once the sidecar context is exhausted every later state row is a
     # real delta, even if it repeats a short earlier message.
-    sidecar_index = best_len
+    sidecar_index = best_offset + best_len
     state_index = best_len
     while sidecar_index < len(sidecar_keys) and state_index < len(state_keys):
         if (state_keys[state_index] == sidecar_keys[sidecar_index]
@@ -10371,6 +10379,7 @@ def merge_session_messages_append_only(
     _MESSAGE_CACHE_MISSING = object()
     _cached_msg_prepared: dict[int, dict[str, object]] = {}
     _cached_msg_keys: dict[tuple[int, str], object] = {}
+    ambiguous_timestamp_keys = set()
 
     _message_key_helpers = {
         "merge": _session_message_merge_key,
@@ -10414,7 +10423,16 @@ def merge_session_messages_append_only(
             else:
                 value = helper(prepared_msg)
             if kind == "dedup":
-                value = (value, _message_occurrence_key(msg))
+                occurrence = _message_occurrence_key(msg)
+                # Exact timestamped legacy copies can be replay duplicates;
+                # unidentified rows without timestamps remain distinct.
+                timestamp, valid = _message_exact_timestamp_details(msg)
+                if occurrence[0] == 'unidentified' and valid and timestamp is not None:
+                    timestamp_key = ((_cached_message_key(msg, "merge"), str(msg.get("timestamp")))
+                                     if ambiguous_timestamp_keys else None)
+                    if timestamp_key not in ambiguous_timestamp_keys:
+                        occurrence = ('legacy-timestamp', msg.get('_source'), msg.get('_active_turn_token'))
+                value = (value, occurrence)
             _cached_msg_keys[cache_key] = value
             return value
 
@@ -10436,6 +10454,24 @@ def merge_session_messages_append_only(
         value = helper(prepared_msg)
         _cached_msg_keys[cache_key] = value
         return value
+
+    def _cached_replay_match(target, source, *, allow_legacy=False):
+        equal = _cached_message_key(target, "content_sidecar") == _cached_message_key(source, "content_state")
+        # Only the authoritative state.db input normalizes runtime wrappers;
+        # literal user text in the sidecar is never stripped.
+        normalized_mirror = (equal and isinstance(target, dict) and isinstance(source, dict)
+                             and target.get('content') != source.get('content'))
+        return _cross_source_replay_match(
+            target, source, allow_legacy=allow_legacy or normalized_mirror, content_equal=equal,
+        )
+
+    # Multiple distinct local rows with the same timestamp/key prove that
+    # timestamp is not unique in this transcript. Preserve excess state rows.
+    timestamp_owners = collections.defaultdict(set)
+    for local in sidecar_messages:
+        if isinstance(local, dict):
+            timestamp_owners[(_cached_message_key(local, "merge"), str(local.get("timestamp")))].add(id(local))
+    ambiguous_timestamp_keys.update(key for key, owners in timestamp_owners.items() if len(owners) > 1)
 
     watermark_timestamp = _message_timestamp_as_float({"timestamp": truncation_watermark})
     if not state_messages:
@@ -10606,8 +10642,8 @@ def merge_session_messages_append_only(
         sidecar_candidates[_cached_message_key(target, "visible_sidecar")].append(target)
     # A mirrored contiguous segment may start in the middle after compaction.
     aligned_history = any(
-        _cross_source_replay_match(sidecar_visible_messages[start], state_messages[0], allow_legacy=True)
-        and _cross_source_replay_match(sidecar_visible_messages[start + 1], state_messages[1], allow_legacy=True)
+        _cached_replay_match(sidecar_visible_messages[start], state_messages[0], allow_legacy=True)
+        and _cached_replay_match(sidecar_visible_messages[start + 1], state_messages[1], allow_legacy=True)
         for start in range(len(sidecar_visible_messages) - 1)
     ) if len(state_messages) >= 2 else False
     sidecar_content_candidates = collections.defaultdict(list)
@@ -10677,7 +10713,7 @@ def merge_session_messages_append_only(
         replays_sidecar_prefix = False
         replay_target = None
         if state_replay_idx < len(sidecar_visible_sequence):
-            if _cross_source_replay_match(
+            if _cached_replay_match(
                 sidecar_visible_messages[state_replay_idx], msg, allow_legacy=aligned_history
             ):
                 replays_sidecar_prefix = True
@@ -10843,7 +10879,7 @@ def merge_session_messages_append_only(
             target = next((target for target in sidecar_candidates[matched_visible_key]
                            if id(target) not in consumed_sidecar_ids
                            and _message_private_identity_compatible(target, msg)
-                           and (aligned_history or _cross_source_replay_match(target, msg))), None)
+                           and (aligned_history or _cached_replay_match(target, msg))), None)
             if target is not None:
                 consumed_sidecar_ids.add(id(target))
                 _merge_session_display_metadata(target, msg)
@@ -10896,7 +10932,11 @@ def merge_session_messages_append_only(
                 _tc = msg.get("tool_calls")
                 if _tc:
                     _ck = content_key
-                    if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
+                    distinct_calls = any(
+                        target.get('tool_calls') != _tc
+                        for target in sidecar_content_candidates.get(visible_key[:2], [])
+                    )
+                    if (_ck in seen_content_keys or distinct_calls) and dedup_key not in seen_dedup_keys:
                         # Different tool_calls from sidecar — preserve, but keep
                         # the row in timestamp order. Falling through to the
                         # generic append path would move older tool-call-only
@@ -11015,6 +11055,24 @@ def reconciled_state_db_messages_for_session(
                 local_messages = sidecar_messages
                 using_context_messages = False
             if using_context_messages:
+                watermark = _message_timestamp_as_float({'timestamp': getattr(session, 'truncation_watermark', None)})
+                boundary = _message_timestamp_as_float({'timestamp': getattr(session, 'truncation_boundary', None)})
+                if (getattr(session, 'compression_anchor_mode', None) == 'manual'
+                        and watermark is not None and boundary == watermark):
+                    # Manual compression is an authoritative context boundary.
+                    # Restamped summaries need not share the old state row's
+                    # timestamp, and pre-boundary rows must not expand them.
+                    state_messages = [message for message in state_messages or []
+                                      if (ts := _message_timestamp_as_float(message)) is not None and ts > watermark]
+                    # Reconcile only post-boundary checkpoints. Older summary
+                    # text cannot consume a genuinely new equal-text turn.
+                    post_start = next((index for index, message in enumerate(local_messages)
+                                       if (ts := _message_timestamp_as_float(message)) is not None and ts > watermark),
+                                      len(local_messages))
+                    result = list(local_messages[:post_start]) + merge_session_messages_append_only(
+                        local_messages[post_start:], state_messages,
+                    )
+                    return _state_db_session_messages_result(result, state_revision, with_revision=with_revision)
                 compressed_context = _context_messages_include_compression_marker(local_messages)
                 anchor_key = getattr(session, "compression_anchor_message_key", None)
                 if compressed_context:

@@ -21,5 +21,9 @@ def reset_hermes_home_override(token):
     _home_override.reset(token)
 
 
+def get_default_hermes_root():
+    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
+
+
 def get_hermes_home():
     return _home_override.get() or Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()

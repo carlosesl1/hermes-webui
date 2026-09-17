@@ -61,7 +61,7 @@ def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
         "get_profile_runtime_env",
         lambda home: {"HERMES_CONFIG_PATH": str(Path(home) / "config.yaml")},
     )
-    monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: None)
+    monkeypatch.setattr(profiles, "_hermes_home_override_available", None)
 
     patch_calls: list[dict] = []
 
