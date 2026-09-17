@@ -1441,7 +1441,22 @@ class Session:
             raise ValueError('Unsafe session_id')
         with _session_save_lock(self.path):
             if not self.path.is_file():
-                raise FileNotFoundError(self.path)
+                # A freshly-created conversation intentionally has no JSON yet.
+                # Only that exact cached instance may materialize a non-empty
+                # draft. A deleted/previously-saved object must never resurrect.
+                fresh = (getattr(self, '_draft_new_session', False)
+                         and not getattr(self, '_saved_count_identity', None)
+                         and SESSIONS.get(self.session_id) is self
+                         and not self.messages
+                         and not getattr(self, '_loaded_metadata_only', False))
+                if not fresh:
+                    raise FileNotFoundError(self.path)
+                self.composer_draft = copy.deepcopy(draft)
+                self._draft_baseline = copy.deepcopy(draft)
+                if not str(draft.get('text') or '').strip() and not draft.get('files'):
+                    return  # Clearing a new composer must not create a ghost chat.
+                self.save(touch_updated_at=False)
+                self._draft_new_session = False
             payload = json.dumps({'created_at': self.created_at, 'draft': draft}, ensure_ascii=False)
             tmp = self.draft_path.with_suffix(f'.draft.tmp.{uuid.uuid4().hex}')
             try:
@@ -5186,6 +5201,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_created_at=wt.get('created_at') if wt else None,
         enabled_toolsets=enabled_toolsets,
     )
+    s._draft_new_session = True
     # #4985: defensive — auto-generated uuids don't collide with the
     # tombstone, but if a future caller ever passes an explicit id that
     # was previously pruned, clear the entry so the new session isn't

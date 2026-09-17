@@ -1,5 +1,6 @@
 """Disk identity is evidence, not a trusted metadata count."""
 import json
+import os
 import pytest
 
 @pytest.fixture
@@ -243,10 +244,31 @@ def test_repeated_external_race_fails_closed(store, monkeypatch):
     def replace(src, dst):
         result = original(src, dst)
         if str(dst).endswith('.bak'):
+            previous = s.path.stat()
             s.path.write_bytes(raw)
+            # Some overlay filesystems coalesce rapid writes within one tick.
+            # Force a distinct external generation rather than depending on
+            # wall-clock resolution to model the race under test.
+            os.utime(s.path, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000_000))
         return result
     monkeypatch.setattr(store, '_safe_replace', replace)
     with pytest.raises(RuntimeError, match='changed repeatedly'):
         s.save(skip_index=True)
     assert s.path.read_bytes() == raw
     assert not list(s.path.parent.glob('*.tmp.*'))
+
+
+def test_new_composer_clear_stays_memory_only_but_typed_draft_persists(store, monkeypatch):
+    monkeypatch.setattr(store, 'get_last_workspace', lambda: '/tmp')
+    s = store.new_session(workspace='/tmp', model='fixture', profile='default')
+    s.save_draft({'text': '', 'files': []})
+    assert not s.path.exists() and not s.draft_path.exists()
+    s.save_draft({'text': 'new unsent draft', 'files': []})
+    assert s.path.is_file()
+    loaded = store.Session.load(s.session_id)
+    assert loaded.composer_draft['text'] == 'new unsent draft'
+    assert loaded.messages == []
+    s.path.unlink()
+    with pytest.raises(FileNotFoundError):
+        s.save_draft({'text': 'cannot revive deleted conversation'})
+    assert not s.path.exists()
