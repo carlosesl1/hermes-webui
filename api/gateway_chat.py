@@ -38,6 +38,7 @@ from api.config import (
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
+from api.tool_outcomes import tool_result_is_error
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +509,7 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
         return None
     status = str(payload.get("status") or "running").strip().lower()
     tid = payload.get("toolCallId") or payload.get("tool_call_id") or payload.get("id")
-    is_complete = event_type == "tool.completed" or status in {"completed", "complete", "success", "error", "failed"}
+    is_complete = event_type == "tool.completed" or status in {"completed", "complete", "success", "error", "failed", "cancelled", "canceled", "interrupted"}
     event_payload = {
         "event_type": "tool.completed" if is_complete else "tool.started",
         "name": name,
@@ -516,7 +517,7 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
         "args": bound_run_journal_snapshot_args(payload.get("args"))
         if isinstance(payload.get("args"), dict)
         else {},
-        "is_error": bool(payload.get("error")) or status in {"error", "failed"},
+        "is_error": tool_result_is_error(name, payload) or tool_result_is_error(name, payload.get("result")),
     }
     if tid:
         event_payload["tid"] = str(tid)

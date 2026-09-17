@@ -9186,6 +9186,33 @@ def _stable_message_identity_details(message: dict | None) -> tuple[str | None, 
     return (next(iter(values)) if values else None), True
 
 
+def _message_occurrence_key(message):
+    """Session-local provenance, never content or wall-clock coincidence.
+
+    Unidentified/contradictory rows get an ephemeral object key, not a persisted
+    invented identity. Separate ambiguous records must survive reconciliation.
+    """
+    if not isinstance(message, dict):
+        return ('unidentified', id(message))
+    stable, stable_valid = _stable_message_identity_details(message)
+    row, row_valid = _state_db_row_identity_details(message)
+    if not stable_valid or not row_valid:
+        return ('unidentified', id(message))
+    scope = (message.get('_source'), message.get('_active_turn_token'))
+    if row is not None:
+        return ('state-row', row, scope)
+    if stable is not None:
+        return ('message', stable, scope)
+    if message.get('tool_call_id'):
+        return ('tool-result', str(message['tool_call_id']), scope)
+    calls = message.get('tool_calls')
+    if isinstance(calls, list) and calls and all(isinstance(c, dict) and c.get('id') for c in calls):
+        return ('tool-calls', tuple(str(c['id']) for c in calls), scope)
+    if message.get('_active_turn_token') and message.get('role') == 'user':
+        return ('active-user', scope)
+    return ('unidentified', id(message))
+
+
 def _message_private_identity_compatible(target: dict | None, source: dict | None) -> bool:
     """Return whether private identities do not contradict one another."""
     target_stable, target_stable_valid = _stable_message_identity_details(target)
@@ -9755,6 +9782,7 @@ def _session_message_dedup_key(msg: dict):
         str(msg.get("role") or ""),
         str(msg.get("content") or ""),
         str(msg.get("timestamp") or ""),
+        _message_occurrence_key(msg),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
         _tc_key,
@@ -9837,6 +9865,7 @@ def _session_message_visible_key(
         role,
         content,
         _tc_key,
+        _message_occurrence_key(msg),
     ), msg)
 
 
@@ -9865,7 +9894,7 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         return visible_key
     role = visible_key[0]
     content = visible_key[1] if len(visible_key) > 1 else ""
-    sidecar = visible_key[3] if len(visible_key) > 3 else None
+    sidecar = visible_key[3:]
     if not content:
         return None
     # Exact identity above remains authoritative at every size. The fallback
@@ -9881,7 +9910,7 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
     for existing_key in lookup.get("by_role", {}).get(role, []):
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
-        existing_sidecar = existing_key[3] if len(existing_key) > 3 else None
+        existing_sidecar = existing_key[3:]
         if role != existing_role or sidecar != existing_sidecar or not existing_content:
             continue
         # Exact visible-key equality was checked above. For very large payloads
@@ -9975,11 +10004,11 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     )
 
     sidecar_keys = [
-        _session_message_content_key(m, normalize_workspace_prefix=False)
+        (_session_message_content_key(m, normalize_workspace_prefix=False), _message_occurrence_key(m))
         for m in sidecar_context
     ]
     state_keys = [
-        _session_message_content_key(m, normalize_workspace_prefix=True)
+        (_session_message_content_key(m, normalize_workspace_prefix=True), _message_occurrence_key(m))
         for m in state_messages
     ]
     max_offset = min(len(sidecar_keys), len(state_keys))
@@ -10697,7 +10726,7 @@ def merge_session_messages_append_only(
                 # Different tool_calls produce different merge_keys even with
                 # identical content/timestamp, so an unchecked continue here
                 # would drop legitimately distinct turns.  (#3346 / PR #3665)
-                if key in seen_message_keys:
+                if key in seen_message_keys and dedup_key in seen_dedup_keys:
                     _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                     continue
         if key in seen_message_keys and key[0] == "message_id":
@@ -10727,6 +10756,7 @@ def merge_session_messages_append_only(
         # only when their visible content is not already present.
         if (
             key[0] != "message_id"
+            and watermark_timestamp is not None
             and max_sidecar_timestamp is not None
             and timestamp is not None
             and timestamp <= max_sidecar_timestamp

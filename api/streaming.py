@@ -6314,7 +6314,10 @@ def _messages_have_prefix(messages, prefix, *, key_fn=None):
 
 def _message_replay_key(msg):
     """Return a stable comparison key for replay/overlap de-duplication."""
+    from api.models import _message_occurrence_key
     identity = _message_identity(msg)
+    if isinstance(msg, dict):
+        identity = (*identity, _message_occurrence_key(msg)) if identity is not None else (_message_occurrence_key(msg),)
     # ``api_content`` is a provider-facing replay sidecar.  It must participate
     # in context/replay overlap identity or two same-visible turns can collapse
     # before the Agent sees the original wire bytes.  Keep synthetic/adjacent
@@ -6384,6 +6387,9 @@ def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
         else None
     )
     if normalized_previous_api_content != normalized_candidate_api_content:
+        return False
+    from api.models import _message_occurrence_key
+    if _message_occurrence_key(previous_msg) != _message_occurrence_key(candidate_msg):
         return False
     previous_text = " ".join(_message_text(previous_msg.get('content', '')).split())
     candidate_text = " ".join(_message_text(candidate_msg.get('content', '')).split())
@@ -7395,7 +7401,7 @@ def _merge_display_messages_after_agent_result(
             and isinstance(msg, dict)
             and msg.get('role') == 'assistant'
             and merged
-            and _message_identity(merged[-1]) == key
+            and _message_replay_key(merged[-1]) == _message_replay_key(msg)
         ):
             # Some provider/result replay paths can include the same assistant
             # message twice in the current delta. Treat only adjacent identity
@@ -10114,6 +10120,8 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed':
+                    from api.tool_outcomes import tool_result_is_error
+                    cb_kwargs['is_error'] = tool_result_is_error(name, cb_kwargs.get('result', preview), is_error=cb_kwargs.get('is_error'))
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
@@ -10211,8 +10219,10 @@ def _run_agent_streaming(
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool start', exc_info=True)
 
-            def on_tool_complete(tool_call_id, name, args, function_result):
+            def on_tool_complete(tool_call_id, name, args, function_result, **metadata):
                 try:
+                    from api.tool_outcomes import tool_result_is_error
+                    is_error = tool_result_is_error(name, function_result, is_error=metadata.get("is_error"))
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
@@ -10223,6 +10233,7 @@ def _run_agent_streaming(
                             if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
                                 live_tc['done'] = True
                                 live_tc['snippet'] = result_snippet
+                                live_tc['is_error'] = is_error
                                 break
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
@@ -10231,6 +10242,7 @@ def _run_agent_streaming(
                                 if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
                                     shared_tc['done'] = True
                                     shared_tc['snippet'] = result_snippet
+                                    shared_tc['is_error'] = is_error
                                     break
                         _checkpoint_activity[0] += 1
                         put('tool_complete', {
@@ -10239,7 +10251,7 @@ def _run_agent_streaming(
                             'preview': result_snippet,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
-                            'is_error': False,
+                            'is_error': is_error,
                         })
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can

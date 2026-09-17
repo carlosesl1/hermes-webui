@@ -10,10 +10,10 @@ def test_deduplicate_context_messages_removes_duplicates():
     from api.streaming import _deduplicate_context_messages
 
     messages = [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "Hi there!"},
-        {"role": "user", "content": "hello"},  # duplicate of [0]
-        {"role": "assistant", "content": "Hi there!"},  # duplicate of [1]
+        {"role": "user", "content": "hello", "id": 1},
+        {"role": "assistant", "content": "Hi there!", "id": 2},
+        {"role": "user", "content": "hello", "id": 1},  # same occurrence as [0]
+        {"role": "assistant", "content": "Hi there!", "id": 2},  # same occurrence as [1]
     ]
 
     result = _deduplicate_context_messages(messages)
@@ -48,12 +48,8 @@ def test_deduplicate_context_messages_preserves_identical_answers_in_different_t
     ]
 
     result = _deduplicate_context_messages(messages)
-    # _message_identity is identity-based, not turn-aware:
-    # second assistant "4" has the same identity as first → removed.
-    # Second user "what is 3+1?" has different content → kept.
-    # This is intentional: the dedup catches context pollution from
-    # merge_session_messages_append_only, not replayed turns.
-    assert len(result) == 3  # user "2+2", assistant "4", user "3+1"
+    # Equal answer text is not proof of a duplicate occurrence.
+    assert result == messages
 
 
 def test_deduplicate_context_messages_empty_input():
@@ -77,7 +73,7 @@ def test_deduplicate_context_messages_with_tool_calls():
 
 
 def test_deduplicate_context_messages_different_timestamps_same_content():
-    """Messages with same content but different timestamps should be deduped."""
+    """Different timestamped occurrences must preserve identical literal text."""
     from api.streaming import _deduplicate_context_messages
 
     messages = [
@@ -88,7 +84,7 @@ def test_deduplicate_context_messages_different_timestamps_same_content():
     ]
 
     result = _deduplicate_context_messages(messages)
-    assert len(result) == 2  # duplicates removed despite different timestamps
+    assert result == messages
 
 
 def test_message_identity_strips_workspace_prefix():
