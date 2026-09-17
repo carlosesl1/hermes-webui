@@ -103,6 +103,14 @@ clipped.messages[0]={role:'assistant',content:'row ',_content_truncated:true};
 assert.equal(_mergeSettlementWindow(old,clipped).messages[72].content,'row 72');
 const restored=_mergeSettlementWindow(old,clipped);
 assert.equal(_mergeSettlementWindow(restored.messages,clipped).messages[72].content,'row 72');
+const oldPartial={role:'assistant',content:'abcdefgh',_content_truncated:true,_preview_content_truncated:true,_content_original_chars:100};
+const short={session_id:'s',_settlement_window:'tail_v1',_messages_offset:0,messages:[{...oldPartial,content:'abcd'}]};
+const partial=_mergeSettlementWindow([oldPartial],short).messages[0];
+assert.equal(partial.content,'abcdefgh');assert.equal(partial._preview_content_truncated,true);
+for(const key of ['timestamp','message_id','_active_turn_token']){
+ const replaced=_mergeSettlementWindow([{role:'assistant',content:'abcd obsolete', [key]:1}],{...short,messages:[{...short.messages[0],[key]:2}]}).messages[0];
+ assert.equal(replaced.content,'abcd');assert.equal(replaced._preview_content_truncated,true);
+}
 const toolMerge=_mergeSettlementWindow(old.slice(60),{...incoming,tool_calls:[{id:'new',assistant_msg_idx:100}]},60,true,[{id:'prior',assistant_msg_idx:2}]);
 assert.deepEqual(toolMerge.tool_calls.map(t=>t.assistant_msg_idx),[2,40]);
 assert.equal(toolMerge.has_more,true);

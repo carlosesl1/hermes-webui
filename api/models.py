@@ -9247,6 +9247,12 @@ def _cross_source_replay_match(target, source, *, allow_legacy=False):
 
 def _message_private_identity_compatible(target: dict | None, source: dict | None) -> bool:
     """Return whether private identities do not contradict one another."""
+    if isinstance(target, dict) and isinstance(source, dict):
+        for field in ('_source', '_active_turn_token', 'tool_call_id', 'tool_use_id'):
+            if target.get(field) and source.get(field) and target[field] != source[field]:
+                return False
+        if target.get('tool_calls') and source.get('tool_calls') and target['tool_calls'] != source['tool_calls']:
+            return False
     target_stable, target_stable_valid = _stable_message_identity_details(target)
     source_stable, source_stable_valid = _stable_message_identity_details(source)
     if not target_stable_valid or not source_stable_valid:
@@ -9413,6 +9419,8 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
     used_sources: set[int] = set()
 
     def _attach(target, source):
+        if not _message_private_identity_compatible(target, source):
+            return
         _copy_api_content_sidecar(target, source)
         if matches is not None:
             matches[id(source)] = target

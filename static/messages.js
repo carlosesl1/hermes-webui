@@ -19,13 +19,17 @@ function _mergeSettlementWindow(previous, incoming, oldOffset=0, sameSession=tru
   const restored=rows.map((row,i)=>{
     const old=sameSession?previous[start-oldOffset+i]:null;
     const compatible=old&&old.role===row?.role
-      && (!old._ts||!row._ts||old._ts===row._ts)
-      && ((!old.id&&!row.id)||old.id===row.id);
+      && ['id','message_id','timestamp','_ts','_active_turn_token','_source'].every(key=>
+        old[key]==null||row?.[key]==null||old[key]===row[key])
+      && (!old.tool_calls||!row.tool_calls||JSON.stringify(old.tool_calls)===JSON.stringify(row.tool_calls));
     if(!row?._content_truncated||!compatible) return row;
     if(typeof old.content==='string'&&typeof row.content==='string'&&!old.content.startsWith(row.content)) return row;
     const full=_restoreSettlementPreview(old,row);
-    if(typeof full.content==='string'&&full.content.length>String(row.content||'').length)
-      full._preview_content_truncated=false;
+    if(typeof full.content==='string'&&full.content.length>String(row.content||'').length){
+      const original=Number(row._content_original_chars);
+      const oldComplete=old._preview_content_truncated===false||!old._content_truncated;
+      full._preview_content_truncated=!(oldComplete||(Number.isFinite(original)&&original>0&&full.content.length>=original));
+    }
     return full;
   });
   let messages=restored;

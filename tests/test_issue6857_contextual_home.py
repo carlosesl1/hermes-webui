@@ -204,3 +204,31 @@ def test_sync_chat_runs_in_session_home(homes, monkeypatch, tmp_path):
     exercise(monkeypatch, tmp_path)
     assert seen == [paths["alpha"]]
     assert runtime.get_hermes_home_override() is None
+
+
+def test_startup_credentials_belong_only_to_launch_home(homes, monkeypatch):
+    from api import config
+    paths, _ = homes
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(paths["default"]))
+    monkeypatch.setattr(profiles, "_INITIAL_PROCESS_ENV", {"OPENAI_API_KEY": "synthetic-launch"})
+    monkeypatch.setattr(profiles, "_profile_secret_env_names", lambda home: {"OPENAI_API_KEY"})
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-transient")
+    with profiles.profile_env_for_background_worker("default", scope_skill_modules=False):
+        assert config._thread_ctx.env["OPENAI_API_KEY"] == "synthetic-launch"
+        assert os.environ["OPENAI_API_KEY"] == "synthetic-launch"
+        with profiles.profile_env_for_background_worker("alpha", scope_skill_modules=False):
+            assert "OPENAI_API_KEY" not in config._thread_ctx.env
+            assert "OPENAI_API_KEY" not in os.environ
+        assert os.environ["OPENAI_API_KEY"] == "synthetic-launch"
+    assert os.environ["OPENAI_API_KEY"] == "synthetic-transient"
+
+
+def test_authoritative_worker_workspace_wins_profile_default(homes, monkeypatch):
+    from api import config
+    monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda home: {"TERMINAL_CWD": "/profile-default"})
+    with profiles.profile_env_for_background_worker("alpha", scope_skill_modules=False,
+             runtime_overrides={"TERMINAL_CWD": "/selected-workspace", "HERMES_SESSION_KEY": "s"}):
+        assert config._thread_ctx.env["TERMINAL_CWD"] == "/selected-workspace"
+        assert os.environ["TERMINAL_CWD"] == "/selected-workspace"
+        assert config._thread_ctx.env["HERMES_SESSION_KEY"] == "s"
+

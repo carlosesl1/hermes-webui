@@ -40,6 +40,8 @@ _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 # startup control: a pinned profile's .env may be loaded into live os.environ
 # later, but must not be able to change whether the process is isolated.
 _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
+# Private launch snapshot: never inherit another worker's transient credentials.
+_INITIAL_PROCESS_ENV = dict(os.environ)
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
@@ -1186,6 +1188,7 @@ def profile_env_for_background_worker(
     logger_override: Optional[logging.Logger] = None,
     *,
     scope_skill_modules: bool = True,
+    runtime_overrides: Optional[dict[str, str]] = None,
 ):
     """Temporarily route detached worker config reads through a profile.
 
@@ -1216,6 +1219,15 @@ def profile_env_for_background_worker(
     # Home is authoritative from the selected profile, never its .env file.
     safe_runtime_env = {k: v for k, v in safe_runtime_env.items() if k != "HERMES_HOME"}
     secret_env_names.discard("HERMES_HOME")
+    launch_home = Path(_INITIAL_HERMES_HOME or _DEFAULT_HERMES_HOME).expanduser()
+    if profile_home_path.resolve() == launch_home.resolve():
+        startup_secrets = {k: _INITIAL_PROCESS_ENV[k] for k in secret_env_names if k in _INITIAL_PROCESS_ENV}
+        safe_runtime_env = {**startup_secrets, **safe_runtime_env}
+    if runtime_overrides:
+        allowed = {"TERMINAL_CWD", "HERMES_EXEC_ASK", "HERMES_SESSION_KEY"}
+        if set(runtime_overrides) - allowed:
+            raise ValueError("Unsupported worker runtime override")
+        safe_runtime_env.update({k: str(v) for k, v in runtime_overrides.items()})
     thread_env = dict(safe_runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
     # Hybrid profile routing: keep the broad runtime env in WebUI's thread-local

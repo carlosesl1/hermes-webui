@@ -157,3 +157,21 @@ def test_aligned_prefix_cannot_override_conflicting_provenance(field, first, sec
     row = {'role': 'user', 'content': 'continue', 'timestamp': 100.0}
     assert not _messages_have_prefix([{**row, field: second}],
                                     [{**row, field: first}], key_fn=_message_replay_key)
+
+
+@pytest.mark.parametrize('field', ['tool_calls', '_active_turn_token'])
+def test_sidecar_attachment_cannot_delete_contradictory_occurrence(field):
+    from api.models import _reconcile_api_content_sidecars, merge_session_messages_append_only
+    left = {'role': 'assistant', 'content': 'working', 'timestamp': 10}
+    right = {**left, 'api_content': '[{"type":"text","text":"working"}]'}
+    if field == 'tool_calls':
+        left[field], right[field] = [{'id': 'old-call'}], [{'id': 'new-call'}]
+    else:
+        left[field], right[field] = 'old-turn', 'new-turn'
+    matches = {}
+    _reconcile_api_content_sidecars([left], [right], matches=matches)
+    assert not matches and 'api_content' not in left
+    merged = merge_session_messages_append_only([left], [right])
+    assert len(merged) == 2
+    assert [m[field] for m in merged] == [left[field], right[field]]
+

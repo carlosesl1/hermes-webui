@@ -129,19 +129,27 @@ def post_tools(value):
     return h
 
 
-@pytest.mark.parametrize("value", [["web"], None, []])
+@pytest.mark.parametrize("value", [["web"], None])
 def test_toolsets_invalidate_owner_before_save(tool_session, value):
     s, homes, saved = tool_session
     original = s.save
     def save():
         assert snapshots(homes["owner"]) == (None, None)
-        assert routes._get_session_agent_lock("s").locked()
+        lock = routes._get_session_agent_lock("s")
+        assert lock.locked() if hasattr(lock, "locked") else lock._is_owned()
         original()
     s.save = save
     assert post_tools(value).status == 200
     assert json.loads(saved.read_text()) == value
     assert snapshots(homes["active"]) == ('["terminal"]', "old")
     assert snapshots(homes["owner"], "other") == ('["terminal"]', "old")
+
+
+def test_empty_toolsets_rejected_without_invalidating_snapshot(tool_session):
+    s, homes, saved = tool_session
+    assert post_tools([]).status == 400
+    assert s.enabled_toolsets == ["terminal"]
+    assert snapshots(homes["owner"]) == ('["terminal"]', "old")
 
 
 def test_db_failure_leaves_settings_unchanged_and_retry_works(tool_session):

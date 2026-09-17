@@ -6588,6 +6588,11 @@ def _repair_foreign_session_model_provider(
     from api.config import _PROVIDER_DISPLAY, _PROVIDER_MODELS
 
     known = set(_PROVIDER_DISPLAY) | set(_PROVIDER_MODELS)
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        known.update(PROVIDER_REGISTRY)
+    except ImportError:
+        pass
     local = {"ollama", "lmstudio", "vllm", "local", "custom", "moa"}
     if stored_provider not in known or stored_provider in local or stored_provider.startswith("custom:"):
         return resolved_provider
@@ -17100,7 +17105,8 @@ def handle_post(handler, parsed) -> bool:
             if _archive_db.is_file():
                 try:
                     with closing(_archive_sqlite.connect(_archive_db.as_uri() + "?mode=ro", uri=True)) as _conn:
-                        _source_row = _conn.execute("SELECT source FROM sessions WHERE id = ?", (sid,)).fetchone()
+                        _has_sessions = _conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").fetchone()
+                        _source_row = _conn.execute("SELECT source FROM sessions WHERE id = ?", (sid,)).fetchone() if _has_sessions else None
                     if _source_row and str(_source_row[0]).strip().lower() == "subagent":
                         return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
                 except _archive_sqlite.Error:
@@ -24579,7 +24585,10 @@ def _handle_chat_sync(handler, body):
 
         from api.profiles import profile_env_for_background_worker
 
-        with CHAT_LOCK, profile_env_for_background_worker(s, "synchronous chat", logger_override=logger):
+        with CHAT_LOCK, profile_env_for_background_worker(
+            s, "synchronous chat", logger_override=logger,
+            runtime_overrides={"TERMINAL_CWD": str(workspace), "HERMES_EXEC_ASK": "1", "HERMES_SESSION_KEY": s.session_id},
+        ):
             from api.config import (
                 resolve_model_provider,
                 resolve_custom_provider_connection,

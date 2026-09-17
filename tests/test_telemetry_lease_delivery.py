@@ -58,6 +58,7 @@ def test_live_metering_and_null_cursor_reach_both_handlers(isolated, monkeypatch
                 streaming._publish_stream_event(isolated, self, "r", "metering", {"active": 1})
             self.put_nowait(("context_status", {"live": True}, None))
             streaming._publish_stream_event(isolated, self, "r", "done", {})
+            streaming._publish_stream_event(isolated, self, "r", "stream_end", {})
             return result
 
     channel = LiveChannel()
@@ -94,7 +95,7 @@ def test_session_replay_filters_legacy_metering_but_validates_cursor(isolated, t
 def test_chat_reconnect_after_lease_uses_real_replay(isolated, monkeypatch, cursor):
     channel = config.StreamChannel()
     monkeypatch.setattr(routes, "peek_stream", lambda *_: channel)
-    for event in ("token", "token", "done"):
+    for event in ("token", "token", "done", "stream_end"):
         streaming._publish_stream_event(isolated, channel, "r", event, {})
     handler = Handler({"Last-Event-ID": "r:1"} if cursor == "header" else {})
     suffix = "" if cursor == "header" else "&" + cursor
