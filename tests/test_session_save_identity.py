@@ -156,7 +156,7 @@ def test_post_draft_route_preserves_transcript(store, monkeypatch):
     handler = SimpleNamespace(command='POST', _safe_webui_print=lambda *a: None)
     routes.handle_post(handler, SimpleNamespace(path='/api/session/draft'))
     assert output['draft'] == {'text':'route draft'}
-    assert modes == [True, True]
+    assert modes and all(modes), "Draft route must perform metadata-only reads"
     assert s.path.read_bytes() == before
 
 

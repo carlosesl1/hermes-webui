@@ -198,8 +198,8 @@ def test_duplicate_assistant_delta_is_not_persisted_twice():
     previous_context = list(previous_display)
     result_messages = previous_context + [
         {"role": "user", "content": "latest prompt"},
-        {"role": "assistant", "content": "current answer"},
-        {"role": "assistant", "content": "current answer"},
+        {"role": "assistant", "content": "current answer", "message_id": "same-occurrence"},
+        {"role": "assistant", "content": "current answer", "message_id": "same-occurrence"},
     ]
 
     merged = streaming._merge_display_messages_after_agent_result(

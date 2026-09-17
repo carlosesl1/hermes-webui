@@ -178,32 +178,51 @@ def test_streaming_and_cron_reject_unsupported_cross_home(homes, monkeypatch):
 
 
 def test_sync_chat_runs_in_session_home(homes, monkeypatch, tmp_path):
-    """Exercise the real synchronous route with an asserting agent factory."""
-    from tests.test_issue6751_api_content_agent_replay import (
-        test_issue6751_sync_chat_agent_receives_original_api_content_bytes as exercise,
-    )
+    """Real synchronous route, uniquely owned fixture (no reused cached session)."""
+    from types import SimpleNamespace
+    import api.config as config
+    import api.models as models
     from api import routes
     paths, runtime = homes
-    original_factory = routes.require_ai_agent_class
+    directory = tmp_path / 'unique-session-state'
+    directory.mkdir()
+    monkeypatch.setattr(models, 'SESSION_DIR', directory)
+    monkeypatch.setattr(models, 'SESSION_INDEX_FILE', directory/'index.json')
+    monkeypatch.setattr(routes, 'SESSION_INDEX_FILE', directory/'index.json')
+    monkeypatch.setattr(routes, 'get_session', models.get_session)
+    monkeypatch.setattr(routes, 'title_from', models.title_from)
+    monkeypatch.setattr(config, 'get_config', lambda: {'model': 'test-model', 'provider': 'test-provider'})
+    monkeypatch.setattr(routes, 'get_config', config.get_config)
+    monkeypatch.setattr(routes, 'resolve_trusted_workspace', lambda value: tmp_path)
+    monkeypatch.setattr(routes, 'load_settings', lambda: {})
+    monkeypatch.setattr(routes, '_resolve_cli_toolsets', lambda: [])
+    monkeypatch.setattr(profiles, 'get_hermes_home_for_profile', lambda name: paths['alpha'])
     seen = []
-
-    def scoped_factory():
-        agent_class = original_factory()
-
-        class ScopedAgent(agent_class):
-            def __init__(self, **kwargs):
-                seen.append(runtime.get_hermes_home())
-                assert runtime.get_hermes_home() == paths["alpha"]
-                assert os.environ["HERMES_HOME"] == str(paths["default"])
-                super().__init__(**kwargs)
-        return ScopedAgent
-
-    # Map the fixture session's resolved home away from the launch home.
-    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda name: paths["alpha"])
-    monkeypatch.setattr(routes, "require_ai_agent_class", scoped_factory)
-    exercise(monkeypatch, tmp_path)
-    assert seen == [paths["alpha"]]
-    assert runtime.get_hermes_home_override() is None
+    class ScopedAgent:
+        def __init__(self, **kwargs):
+            seen.append(runtime.get_hermes_home())
+            assert runtime.get_hermes_home() == paths['alpha']
+            assert os.environ['HERMES_HOME'] == str(paths['default'])
+            assert os.environ['TERMINAL_CWD'] == str(tmp_path)
+        def run_conversation(self, **kwargs):
+            return {'messages': list(kwargs.get('conversation_history') or []) + [
+                {'role': 'user', 'content': kwargs['persist_user_message']},
+                {'role': 'assistant', 'content': 'ok'}], 'final_response': 'ok', 'completed': True}
+    monkeypatch.setattr(routes, 'require_ai_agent_class', lambda: ScopedAgent)
+    session = models.Session(session_id='unique_profile_scoped_sync', workspace=str(tmp_path),
+                             model='test-model', model_provider='test-provider')
+    session.save()
+    class Handler:
+        headers = {}
+        wfile = SimpleNamespace(write=lambda data: None)
+        def send_response(self, status): self.status = status
+        def send_header(self, *args): pass
+        def end_headers(self): pass
+    handler = Handler()
+    routes._handle_chat_sync(handler, {'session_id': session.session_id, 'message': 'scope test', 'workspace': str(tmp_path)})
+    assert handler.status == 200
+    assert seen == [paths['alpha']]
+    assert runtime.get_hermes_home() == paths['default']
 
 
 def test_startup_credentials_belong_only_to_launch_home(homes, monkeypatch):
