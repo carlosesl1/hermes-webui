@@ -241,6 +241,7 @@ def test_repeated_external_race_fails_closed(store, monkeypatch):
     s.messages.pop()
     raw = s.path.read_bytes()
     original = store._safe_replace
+    raced_generations = []
     def replace(src, dst):
         result = original(src, dst)
         if str(dst).endswith('.bak'):
@@ -250,25 +251,59 @@ def test_repeated_external_race_fails_closed(store, monkeypatch):
             # Force a distinct external generation rather than depending on
             # wall-clock resolution to model the race under test.
             os.utime(s.path, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000_000))
+            raced_generations.append(store._save_file_identity(s.path))
         return result
     monkeypatch.setattr(store, '_safe_replace', replace)
     with pytest.raises(RuntimeError, match='changed repeatedly'):
         s.save(skip_index=True)
+    assert len(raced_generations) == len(set(raced_generations)) == 3
     assert s.path.read_bytes() == raw
+    assert s.path.with_suffix('.json.bak').read_bytes() == raw
     assert not list(s.path.parent.glob('*.tmp.*'))
 
 
-def test_new_composer_clear_stays_memory_only_but_typed_draft_persists(store, monkeypatch):
+@pytest.mark.parametrize('draft', [
+    {'text': 'new unsent draft', 'files': []},
+    {'text': '', 'files': [{'name': 'attachment.txt'}]},
+])
+def test_new_composer_clear_stays_memory_only_but_typed_draft_persists(store, monkeypatch, draft):
     monkeypatch.setattr(store, 'get_last_workspace', lambda: '/tmp')
     s = store.new_session(workspace='/tmp', model='fixture', profile='default')
     s.save_draft({'text': '', 'files': []})
     assert not s.path.exists() and not s.draft_path.exists()
-    s.save_draft({'text': 'new unsent draft', 'files': []})
+    s.save_draft(draft)
     assert s.path.is_file()
+    assert s._draft_new_session is False
+    assert '_draft_new_session' not in json.loads(s.path.read_bytes())
+    assert '_draft_new_session' not in json.loads(s.draft_path.read_bytes())
     loaded = store.Session.load(s.session_id)
-    assert loaded.composer_draft['text'] == 'new unsent draft'
+    assert loaded.composer_draft == draft
     assert loaded.messages == []
     s.path.unlink()
     with pytest.raises(FileNotFoundError):
         s.save_draft({'text': 'cannot revive deleted conversation'})
     assert not s.path.exists()
+
+
+@pytest.mark.parametrize('foreign_write', [False, True])
+def test_first_full_save_consumes_fresh_draft_permission(store, monkeypatch, foreign_write):
+    s = store.new_session(workspace='/tmp', model='fixture', profile='default')
+    original = store._safe_replace
+    def replace(src, dst):
+        result = original(src, dst)
+        if foreign_write and dst == s.path:
+            data = json.loads(s.path.read_bytes())
+            data['foreign_writer'] = True
+            s.path.write_text(json.dumps(data), encoding='utf-8')
+        return result
+    monkeypatch.setattr(store, '_safe_replace', replace)
+    s.save(skip_index=True)
+    if foreign_write:
+        assert s._saved_count_identity is None
+    assert '_draft_new_session' not in json.loads(s.path.read_bytes())
+    assert store.SESSIONS[s.session_id] is s
+    s.path.unlink()
+    with pytest.raises(FileNotFoundError):
+        s.save_draft({'text': 'must not recreate deleted session'})
+    assert not s.path.exists() and not s.draft_path.exists()
+    assert s._draft_new_session is False

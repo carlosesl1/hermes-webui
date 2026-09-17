@@ -33,6 +33,14 @@ as clearing after send) persist independently. A draft publication failure does
 not update the in-memory draft. Draft changes and transcript changes are separate
 transactions, not a multi-file atomic commit.
 
+The one exception is a fresh, exact cached `new_session()` instance with no
+messages and no session JSON yet. Clearing that composer remains memory-only;
+typing text or attaching a file materializes its first session snapshot, then
+the draft sidecar. Every successful full-save publication consumes this
+in-memory-only permission, even if a foreign write immediately invalidates the
+saved-count identity. `_draft_new_session` is never serialized. Deleted cached
+sessions cannot use draft persistence to recreate their transcript.
+
 The draft record is tied to `created_at` to prevent reuse by a newly-created
 session with the same ID. Legacy embedded drafts remain the fallback. `.draft`
 files are ignored by session/recovery JSON scanners; orphan drafts cannot create

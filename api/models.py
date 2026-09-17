@@ -1612,6 +1612,10 @@ class Session:
                 if _save_file_identity(self.path) != signature:
                     continue
                 _safe_replace(tmp, self.path)
+                # Publication consumes the fresh-composer permission even when
+                # a foreign writer invalidates our count identity immediately.
+                # That cache is an optimization, not proof we never saved.
+                self._draft_new_session = False
                 committed = _save_file_identity(self.path)
                 written = _save_file_identity(self.path, written_stat)
                 # Rename can alter ctime; inode/dev/size/mtime must still be ours.
