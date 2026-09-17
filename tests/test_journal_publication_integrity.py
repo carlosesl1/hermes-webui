@@ -59,11 +59,11 @@ def test_writer_reservation_cannot_overtake_append(tmp_path, monkeypatch):
         first = pool.submit(writer.append_sse_event, "token", {"text": "paid-token"})
         assert paused.wait(5)
         try:
-            writer.append_sse_event("metering", {"active": 1})
+            writer.append_sse_event("context_status", {"active": 1})
         finally:
             release.set()
         first.result(5)
-    writer.append_sse_event("metering", {})
+    writer.append_sse_event("context_status", {})
     rows = run_journal.read_run_events("sid", "run")["events"]
     assert [row["seq"] for row in rows] == [1, 2, 3]
     assert run_journal.read_session_run_events("sid", after_event_id="run:1")["status"] == "ok"
@@ -103,8 +103,8 @@ def test_worker_publication_cannot_overtake_journal_cursor(tmp_path):
             release.set()
         first.result(5)
         second.result(5)
-    assert [subscriber.get_nowait()[2] for _ in range(2)] == ["run:1", "run:2"]
-    assert config.STREAM_LAST_EVENT_ID["run"] == "run:2"
+    assert [subscriber.get_nowait()[2] for _ in range(2)] == ["run:1", None]
+    assert config.STREAM_LAST_EVENT_ID["run"] == "run:1"
 
 
 def _running_session(tmp_path):

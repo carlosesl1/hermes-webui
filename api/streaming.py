@@ -13309,7 +13309,7 @@ def _publish_stream_event(run_journal, q, stream_id, event, data, *, should_appe
                 q.note_last_event_id(event_id)
             except Exception:
                 logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
-        queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+        queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
         try:
             q.put_nowait(queue_item)
         except Exception:

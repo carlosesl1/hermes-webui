@@ -9313,6 +9313,8 @@ class StreamChannel:
                 self._last_event_id = event_id
             subscribers = list(self._subscribers)
             if not subscribers:
+                if item[0] == "metering":
+                    return  # Live-only telemetry must not enter offline replay.
                 # deque(maxlen) evicts the oldest frame automatically when full.
                 # Log once on the first eviction (debug: an abandoned/disconnected
                 # turn is expected to hit this) and keep a running dropped count

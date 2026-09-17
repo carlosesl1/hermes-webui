@@ -12,6 +12,7 @@ import io
 import gzip
 import json
 from api.sse_chunked import end_sse_headers
+from api.sse_lease import SSELease
 import logging
 import mimetypes
 import os
@@ -18489,6 +18490,8 @@ def _replay_run_journal(
         max_seq=max_seq,
     )
     for entry in journal.get("events") or []:
+        if (entry.get("event") or entry.get("type")) == "metering":
+            continue  # Validate legacy rows/cursors, but never replay telemetry.
         _sse_with_id(
             handler,
             entry.get("event") or entry.get("type") or "message",
@@ -18918,22 +18921,24 @@ def _handle_sse_stream(handler, parsed):
     else:
         subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
         stream_snapshot = {}
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "close")
-    end_sse_headers(handler)
-    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
-    # Replay shares the drain loop's try/finally so every exit path unsubscribes.
+    # Headers and replay share cleanup: an early disconnect must also release
+    # the exact queue acquired above, without touching the worker/replacement.
     try:
+        lease = SSELease()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.send_header("Connection", "close")
+        end_sse_headers(handler)
+        _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
         gap_recovered, replay_cutoff_seq = _sse_replay_run_journal_gap_checked(
             handler, qs, stream_id, stream_snapshot,
             resume_cursor=(resume_after_seq, resume_requested),
         )
         if gap_recovered:
             return True
-        while True:
+        while lease.active():
             try:
                 item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
@@ -18949,7 +18954,9 @@ def _handle_sse_stream(handler, parsed):
             # the frontend's `_lastRunJournalSeq` cursor advances during live
             # streaming. Without this, mid-stream error→replay would arrive
             # with after_seq=0 and double-render every journaled event.
-            event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(stream_id)
+            event_id = queued_event_id if len(item) >= 3 else STREAM_LAST_EVENT_ID.get(stream_id)
+            if event == "metering":
+                event_id = None  # Legacy/gateway two-tuples are also live-only.
             event_seq = _run_journal_same_run_seq(event_id, stream_id)
             if replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq:
                 continue
@@ -19024,6 +19031,8 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
 
     def emit_replay(events, stream_id, cutoff_seq):
         for entry in events:
+            if (entry.get("event") or entry.get("type")) == "metering":
+                continue
             event_id = str(entry.get("event_id") or "")
             event_seq = _run_journal_same_run_seq(event_id, stream_id)
             if cutoff_seq is not None and event_seq is not None and event_seq > cutoff_seq:
@@ -19041,6 +19050,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
             fresh_session = session
         _sse(handler, "session_snapshot", _session_snapshot_payload(fresh_session, active_stream_id=active_stream_id))
 
+    lease = SSELease()
     try:
         replay_events = []
         replay_ok = False
@@ -19055,7 +19065,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
         if subscriber is None:
             if replay_ok:
                 emit_replay(replay_events, active_stream_id, None)
-            while True:
+            while lease.active():
                 subscriber, subscriber_stream, stream_snapshot, active_stream_id = attach_active_stream()
                 if subscriber is not None:
                     break
@@ -19081,7 +19091,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
             else:
                 emit_session_snapshot(active_stream_id)
         try:
-            while True:
+            while lease.active():
                 try:
                     item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
                 except queue.Empty:
@@ -19093,7 +19103,9 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                 else:
                     event, data = item
                     queued_event_id = STREAM_LAST_EVENT_ID.get(active_stream_id)
-                event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(active_stream_id)
+                event_id = queued_event_id if len(item) >= 3 else STREAM_LAST_EVENT_ID.get(active_stream_id)
+                if event == "metering":
+                    event_id = None
                 event_seq = _run_journal_same_run_seq(event_id, active_stream_id)
                 _is_terminal = event in SSE_RELAY_CLOSE_EVENTS
                 _already_sent = (
@@ -19393,13 +19405,14 @@ def _handle_gateway_sse_stream(handler, parsed):
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = watcher.subscribe()
+    lease = SSELease()
     try:
         # Send initial snapshot immediately
         from api.models import get_cli_sessions
         initial = get_cli_sessions()
         _sse(handler, 'sessions_changed', {'sessions': initial})
 
-        while True:
+        while lease.active():
             try:
                 event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
@@ -19428,8 +19441,9 @@ def _handle_session_events_stream(handler):
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = subscribe_session_events()
+    lease = SSELease()
     try:
-        while True:
+        while lease.active():
             try:
                 event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
@@ -21312,6 +21326,7 @@ def _handle_session_sse_stream(handler, parsed):
     # bg_task_complete emits would then never reach this queue. See
     # subscribe_to_session_channel for the full rationale (PR #2971 Greptile P1).
     ch, q = subscribe_to_session_channel(sid, maxsize=64)
+    lease = SSELease()
 
     # NOTE: ``subscribe_to_session_channel`` above acquires a subscriber slot
     # that MUST be released on every exit path. Header setup
@@ -21424,7 +21439,7 @@ def _handle_session_sse_stream(handler, parsed):
                 exc_info=True,
             )
 
-        while True:
+        while lease.active():
             try:
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
