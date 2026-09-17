@@ -7677,7 +7677,7 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     stops being true (metadata moves to another store), this gate would short-
     circuit before the real source — update both together.
     """
-    default = {"title": None, "archived": False}
+    default = {"title": None, "archived": None}
     if not is_safe_session_id(sid):
         return dict(default)
     p = SESSION_DIR / f'{sid}.json'
@@ -7697,14 +7697,16 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
 
     metadata = dict(default)
     try:
-        webui_meta = Session.load_metadata_only(sid)
+        prefix = _read_metadata_json_prefix(p)
+        webui_meta = json.loads(prefix if prefix else p.read_text(encoding='utf-8'))
     except Exception:
         webui_meta = None
-    if webui_meta:
-        title = getattr(webui_meta, 'title', None)
+    if isinstance(webui_meta, dict):
+        title = webui_meta.get('title')
         if title:
             metadata["title"] = title
-        metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+        if isinstance(webui_meta.get('archived'), bool):
+            metadata["archived"] = webui_meta['archived']
 
     with _SIDECAR_METADATA_CACHE_LOCK:
         # Re-check under lock in case a concurrent build populated it; either
@@ -7868,7 +7870,7 @@ def _load_cli_sessions_uncached(
         _sidecar_meta = _state_projection_sidecar_metadata(sid)
         if _sidecar_meta.get('title'):
             _title = _sidecar_meta['title']
-        _archived = bool(_sidecar_meta.get('archived'))
+        _archived = bool(row.get('archived') if _sidecar_meta.get('archived') is None else _sidecar_meta['archived'])
         _display_title = _title or f'{_source.title()} Session'
         cli_sessions.append({
             'session_id': sid,
@@ -7940,7 +7942,7 @@ def _load_cli_sessions_uncached(
                 _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
+                _archived = bool(row.get('archived') if _sidecar_meta.get('archived') is None else _sidecar_meta['archived'])
                 _display_title = _title or 'Cron Session'
                 cli_sessions.append({
                     'session_id': sid,
@@ -8006,7 +8008,7 @@ def _load_cli_sessions_uncached(
                 _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
+                _archived = bool(row.get('archived') if _sidecar_meta.get('archived') is None else _sidecar_meta['archived'])
                 _display_title = _title or 'Webhook Session'
                 cli_sessions.append({
                     'session_id': sid,
@@ -8071,7 +8073,7 @@ def _load_cli_sessions_uncached(
                 _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
+                _archived = bool(row.get('archived') if _sidecar_meta.get('archived') is None else _sidecar_meta['archived'])
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _title or 'Kanban Session',

@@ -588,6 +588,7 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     return path in {
         "/api/session/import",
         "/api/session/import_cli",
+        "/api/session/archive",  # validates explicit owner in its own handler
         "/api/chat/start",
     }
 
@@ -17063,24 +17064,54 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
-        if _session_is_subagent_view_only(sid):
-            return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
+        if "archived" in body and not isinstance(body["archived"], bool):
+            return bad(handler, "archived must be a boolean", 400)
+        owner = _normalize_import_profile_value(body.get("profile"))
+        if "profile" in body and (not isinstance(body["profile"], str) or not owner):
+            return bad(handler, "invalid profile", 400)
+        if owner and _is_isolated_profile_mode() and not _profiles_match(owner, get_active_profile_name()):
+            return bad(handler, "Session not found", 404)
         try:
             s = get_session(sid)
-            # #1558: save() refuses metadata-only session stubs because their
-            # messages list is intentionally empty. If a sidebar/status preload
-            # left one in the LRU cache, upgrade to a full disk load before
-            # mutating archived state so the guard stays intact.
+            # Reload before owner validation: metadata stubs may be stale and
+            # must never replace the transcript with their empty messages list.
             if getattr(s, "_loaded_metadata_only", False):
                 s = Session.load(sid)
                 if s is None:
                     raise KeyError(sid)
                 with LOCK:
                     SESSIONS[sid] = s
-        except KeyError:
-            cli_meta = _lookup_cli_session_metadata(sid)
-            if not cli_meta:
+            stored_owner = getattr(s, "profile", None) or "default"
+            if owner and not _profiles_match(stored_owner, owner):
                 return bad(handler, "Session not found", 404)
+            if not owner and not _session_visible_to_active_profile(stored_owner, handler):
+                return bad(handler, "profile is required", 400)
+            owner = stored_owner
+            if _is_isolated_profile_mode() and not _profiles_match(owner, get_active_profile_name()):
+                return bad(handler, "Session not found", 404)
+            if getattr(s, "read_only", False) or str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")).lower() == "subagent":
+                return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
+            # Preserve the DB-backed subagent guard in the owner's scope; the
+            # active profile may have a different source for the same ID.
+            from api.profiles import get_hermes_home_for_profile
+            import sqlite3 as _archive_sqlite
+            _archive_db = Path(get_hermes_home_for_profile(owner)) / "state.db"
+            if _archive_db.is_file():
+                try:
+                    with closing(_archive_sqlite.connect(_archive_db.as_uri() + "?mode=ro", uri=True)) as _conn:
+                        _source_row = _conn.execute("SELECT source FROM sessions WHERE id = ?", (sid,)).fetchone()
+                    if _source_row and str(_source_row[0]).strip().lower() == "subagent":
+                        return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
+                except _archive_sqlite.Error:
+                    return bad(handler, "Unable to validate session owner", 503)
+        except KeyError:
+            if not owner:
+                return bad(handler, "profile is required", 400)
+            candidates = [row for row in get_cli_sessions(all_profiles=not _is_isolated_profile_mode())
+                          if row.get("session_id") == sid and _profiles_match(row.get("profile"), owner)]
+            if len(candidates) != 1:
+                return bad(handler, "Session owner is missing or ambiguous", 404)
+            cli_meta = candidates[0]
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             # Delegated subagent children (#5307) are view-only and owned by the
@@ -17088,12 +17119,13 @@ def handle_post(handler, parsed) -> bool:
             # sidecar via the archive fallback (the 3rd of the shared
             # import_cli_session write paths).
             _arch_source_tag = (cli_meta.get("source_tag") or cli_meta.get("raw_source") or "").strip().lower()
-            if _arch_source_tag == "subagent" or _is_subagent_child_session_id(sid):
+            if _arch_source_tag == "subagent":
                 return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
             if _is_messaging_session_record(cli_meta):
                 s = Session(
                     session_id=sid,
-                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid, profile=owner), "CLI Session"),
+                    profile=owner,
                     workspace=get_last_workspace(),
                     messages=[],
                     model=cli_meta.get("model") or "unknown",
@@ -17113,7 +17145,7 @@ def handle_post(handler, parsed) -> bool:
                 s.platform = cli_meta.get("platform")
                 s.save(touch_updated_at=False)
             else:
-                msgs = get_cli_session_messages(sid)
+                msgs = get_cli_session_messages(sid, profile=owner)
                 if not msgs:
                     return bad(handler, "Session not found", 404)
                 s = import_cli_session(
@@ -17121,7 +17153,7 @@ def handle_post(handler, parsed) -> bool:
                     cli_meta.get("title") or title_from(msgs, "CLI Session"),
                     msgs,
                     cli_meta.get("model") or "unknown",
-                    profile=cli_meta.get("profile"),
+                    profile=owner,
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
                 )
@@ -20354,10 +20386,9 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
         role = str(message.get("role") or "").strip().lower()
         if role == "user":
             continue
-        text = _message_content_text(message.get("content"))
-        if "MEDIA:" not in text:
-            continue
-        for ref in _MEDIA_TOKEN_RE.findall(text):
+        from api.media_snapshots import iter_public_media_text
+        refs = [ref for text in iter_public_media_text(message) for ref in _MEDIA_TOKEN_RE.findall(text)]
+        for ref in refs:
             if "://" in ref:
                 continue
             try:
@@ -20496,9 +20527,17 @@ def _media_deny_reason(target: Path) -> str | None:
         # Per-profile WebUI state lives at <root>/webui_state (api/workspace.py),
         # so its state subdirs (<root>/webui_state/sessions, etc.) must be denied
         # too — they are NOT direct children of <root>. (Codex review #3234.)
-        _ws_state = (_root / "webui_state")
-        for _sub in _DENY_SUBDIRS:
-            _deny_dirs.append((_ws_state / _sub).resolve())
+        for _layout in ("webui", "webui_state"):
+            _ws_state = _root / _layout
+            # Include the state root for basename/carve-out checks too, including
+            # symlinked state roots whose resolved target is outside Hermes home.
+            for _sub in _DENY_SUBDIRS:
+                _deny_dirs.append((_ws_state / _sub).resolve())
+    _hermes_roots.extend(
+        (_root / _layout).resolve()
+        for _root in list(_hermes_roots)
+        for _layout in ("webui", "webui_state")
+    )
     # The configured media-snapshot store root itself: blobs are internal and
     # only reachable through the validated `snap=` parameter on an authorized
     # path, so a bare `path=` request at or below the store is rejected

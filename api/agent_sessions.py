@@ -739,9 +739,11 @@ def read_importable_agent_session_rows(
                 "                    s.started_at DESC"
             )
 
+        archived_expr = _optional_col('archived', session_cols)
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
+                   {archived_expr},
                    {session_source_expr},
                    {user_id_expr},
                    {chat_id_expr},
