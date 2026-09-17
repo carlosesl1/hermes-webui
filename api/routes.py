@@ -8148,7 +8148,7 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     return _state_db_session_source(sid) == "subagent"
 
 
-def _session_is_subagent_view_only(sid: str) -> bool:
+def _session_is_subagent_view_only(sid: str, *, metadata_only: bool = False) -> bool:
     """Return True when ``sid`` is a delegated subagent child by ANY signal —
     state.db source OR a persisted WebUI sidecar tagged subagent.
 
@@ -8162,7 +8162,7 @@ def _session_is_subagent_view_only(sid: str) -> bool:
     if _is_subagent_child_session_id(sid):
         return True
     try:
-        s = get_session(sid)
+        s = get_session(sid, metadata_only=True) if metadata_only else get_session(sid)
     except Exception:
         return False
     src = (
@@ -15722,9 +15722,10 @@ def handle_post(handler, parsed) -> bool:
             if not sid:
                 return bad(handler, "session_id is required", 400)
             try:
-                s = get_session(sid)
+                s = get_session(sid, metadata_only=True)
             except KeyError:
                 return bad(handler, "Session not found", 404)
+            s._restore_draft()
             draft = getattr(s, "composer_draft", {}) or {}
             return j(handler, {"draft": draft})
         # POST
@@ -15733,7 +15734,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
-        if _session_is_subagent_view_only(sid):
+        if _session_is_subagent_view_only(sid, metadata_only=True):
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
@@ -15752,13 +15753,14 @@ def handle_post(handler, parsed) -> bool:
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
         try:
-            s = get_session(sid)
+            s = get_session(sid, metadata_only=True)
         except KeyError:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
         unchanged = False
         with _get_session_agent_lock(sid):
             _draft_mark("acquired_lock")
+            s._restore_draft()
             current_draft = dict(getattr(s, "composer_draft", {}) or {})
             next_draft = dict(current_draft)
             if text is not None:
@@ -15769,13 +15771,12 @@ def handle_post(handler, parsed) -> bool:
                 unchanged = True
                 saved_draft = current_draft
             else:
-                s.composer_draft = next_draft
                 # Draft persistence is not conversation activity. Touching updated_at
                 # here makes the active-session external-refresh poll force-reload the
                 # current chat every few seconds while the user is typing, and that
                 # delayed reload can restore an older draft over newer local input.
                 _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
+                s.save_draft(next_draft)
                 _draft_mark("after_save")
                 saved_draft = s.composer_draft
         _draft_mark("released_lock")

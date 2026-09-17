@@ -1211,6 +1211,34 @@ def _strip_sidebar_heavy_metadata(row: dict) -> dict:
     return row
 
 
+# Bounded striped locks serialize independent Session objects targeting one path.
+# Separate from the non-reentrant agent lock (callers may already own that lock).
+_SESSION_SAVE_LOCKS = tuple(threading.RLock() for _ in range(64))
+
+
+def _session_save_lock(path):
+    return _SESSION_SAVE_LOCKS[hash(str(path.absolute())) % len(_SESSION_SAVE_LOCKS)]
+
+
+def _save_file_identity(path, stat=None):
+    try:
+        st = stat if stat is not None else path.stat()
+    except FileNotFoundError:
+        return None
+    return (str(path.absolute()), st.st_dev, st.st_ino, st.st_size,
+            st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _read_save_snapshot(path):
+    with path.open('rb') as handle:
+        before = _save_file_identity(path, os.fstat(handle.fileno()))
+        raw = handle.read()
+        after = _save_file_identity(path, os.fstat(handle.fileno()))
+    if before != after or after != _save_file_identity(path):
+        raise RuntimeError('Session changed while reading; retry the save')
+    return raw, after
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1365,6 +1393,7 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        self._draft_baseline = copy.deepcopy(self.composer_draft)
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
@@ -1390,7 +1419,47 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
+    @property
+    def draft_path(self):
+        # Not *.json: sidebar/recovery scanners must not treat drafts as sessions.
+        return self.path.with_suffix('.draft')
+
+    def _restore_draft(self):
+        try:
+            data = json.loads(self.draft_path.read_text(encoding='utf-8'))
+        except (FileNotFoundError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        if data.get('created_at') == self.created_at and isinstance(data.get('draft'), dict):
+            self.composer_draft = data['draft']
+            self._draft_baseline = copy.deepcopy(self.composer_draft)
+
+    def save_draft(self, draft):
+        """Persist transient composer state without reading/writing the transcript."""
+        if not is_safe_session_id(self.session_id):
+            raise ValueError('Unsafe session_id')
+        with _session_save_lock(self.path):
+            if not self.path.is_file():
+                raise FileNotFoundError(self.path)
+            payload = json.dumps({'created_at': self.created_at, 'draft': draft}, ensure_ascii=False)
+            tmp = self.draft_path.with_suffix(f'.draft.tmp.{uuid.uuid4().hex}')
+            try:
+                with tmp.open('w', encoding='utf-8') as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                _safe_replace(tmp, self.draft_path)
+            finally:
+                tmp.unlink(missing_ok=True)
+            self.composer_draft = copy.deepcopy(draft)
+            self._draft_baseline = copy.deepcopy(draft)
+
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        with _session_save_lock(self.path):
+            self._save_locked(touch_updated_at=touch_updated_at, skip_index=skip_index)
+
+    def _save_locked(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1410,6 +1479,12 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        if self.path.exists():
+            if self.composer_draft != self._draft_baseline:
+                self.save_draft(self.composer_draft)
+            else:
+                self._restore_draft()
+        messages_snapshot = list(self.messages or [])
         if touch_updated_at:
             self.updated_at = time.time()
         # Write metadata fields first so load_metadata_only() can read them
@@ -1449,7 +1524,7 @@ class Session:
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
+        meta['message_count'] = len(messages_snapshot)
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
@@ -1457,7 +1532,7 @@ class Session:
         # defense-in-depth; the cached-side freshness check reads real records,
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
-        meta['messages'] = self.messages
+        meta['messages'] = messages_snapshot
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
@@ -1468,82 +1543,73 @@ class Session:
                  and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
 
-        # ── #1558 backup safeguard ──────────────────────────────────────
-        # Before overwriting the session file, copy the previous version to
-        # ``<sid>.json.bak`` IFF the previous file has more messages than the
-        # incoming payload. The asymmetric guard means:
-        #   * Normal grow-the-conversation saves never produce a backup
-        #     (incoming messages >= existing) — keeps disk overhead near zero.
-        #   * Any save that would shrink the messages array (the failure mode
-        #     of #1558, plus anything similar in the future) leaves a recoverable
-        #     snapshot of the pre-shrink state on disk.
-        # The recovery path is api/session_recovery.py — at server startup and
-        # via /api/session/recover, sessions whose JSON has fewer messages than
-        # their .bak get restored automatically.
-        try:
-            if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
-                try:
-                    existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
-                if (
-                    existing_msg_count > 0
-                    and incoming_msg_count == 0
-                    and (self.active_stream_id or self.pending_user_message)
-                ):
-                    logger.warning(
-                        "refusing to overwrite session %s messages with empty active/pending snapshot "
-                        "(existing=%s, incoming=%s, stream=%s)",
-                        self.session_id,
-                        existing_msg_count,
-                        incoming_msg_count,
-                        self.active_stream_id,
-                    )
-                    return
-                if existing_msg_count > incoming_msg_count:
-                    bak_path = self.path.with_suffix('.json.bak')
-                    # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
-                    # mirroring the main save() pattern below. Prevents a
-                    # torn .bak from a crash mid-write or a concurrent
-                    # backup-producing save. Recovery defends against a
-                    # torn .bak (JSONDecodeError → no_action), so the
-                    # failure mode pre-fix was "backup is lost"; with
-                    # this fix the backup either lands cleanly or doesn't
-                    # land at all.
-                    try:
-                        bak_tmp = bak_path.with_suffix(
-                            f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
-                        )
-                        with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(existing_text)
-                            bf.flush()
-                            os.fsync(bf.fileno())
-                        _safe_replace(bak_tmp, bak_path)
-                    except OSError:
-                        # Backup is best-effort; main save proceeds regardless.
-                        try:
-                            bak_tmp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-        except OSError:
-            pass
-
-        tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+        # Serialize once; reuse a proven count only for the exact disk identity.
+        # Never trust the persisted metadata count, which external writers may lag.
+        incoming_msg_count = len(messages_snapshot)
+        tmp = self.path.with_suffix(f'.tmp.{uuid.uuid4().hex}')
         try:
             with open(tmp, 'w', encoding='utf-8') as f:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-            _safe_replace(tmp, self.path)
-        except Exception:
-            try:
-                tmp.unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise
+                written_stat = os.fstat(f.fileno())
+            for attempt in range(3):
+                signature = _save_file_identity(self.path)
+                existing_bytes = None
+                cached = getattr(self, '_saved_count_identity', None)
+                if signature is None:
+                    existing_msg_count = 0
+                elif cached is not None and cached[0] == signature:
+                    existing_msg_count = cached[1]
+                else:
+                    try:
+                        existing_bytes, signature = _read_save_snapshot(self.path)
+                    except (FileNotFoundError, RuntimeError):
+                        continue
+                    try:
+                        existing = json.loads(existing_bytes)
+                        existing_msg_count = len(existing.get('messages') or [])
+                    except (ValueError, AttributeError, TypeError):
+                        existing_msg_count = -1  # preserve corrupt bytes before replacing
+                if (existing_msg_count > 0 and incoming_msg_count == 0
+                        and (self.active_stream_id or self.pending_user_message)):
+                    logger.warning('refusing empty active/pending snapshot for %s', self.session_id)
+                    return
+                if existing_msg_count > incoming_msg_count or existing_msg_count == -1:
+                    if existing_bytes is None:
+                        try:
+                            existing_bytes, read_signature = _read_save_snapshot(self.path)
+                        except (FileNotFoundError, RuntimeError):
+                            continue
+                        if read_signature != signature:
+                            continue
+                    bak_path = self.path.with_suffix('.json.bak')
+                    bak_tmp = bak_path.with_suffix(f'.bak.tmp.{uuid.uuid4().hex}')
+                    try:
+                        with bak_tmp.open('wb') as bf:
+                            bf.write(existing_bytes)
+                            bf.flush()
+                            os.fsync(bf.fileno())
+                        _safe_replace(bak_tmp, bak_path)
+                    finally:
+                        bak_tmp.unlink(missing_ok=True)
+                # Revalidate after backup I/O, immediately before publication.
+                if _save_file_identity(self.path) != signature:
+                    continue
+                _safe_replace(tmp, self.path)
+                committed = _save_file_identity(self.path)
+                written = _save_file_identity(self.path, written_stat)
+                # Rename can alter ctime; inode/dev/size/mtime must still be ours.
+                self._saved_count_identity = (
+                    (committed, incoming_msg_count)
+                    if committed and committed[:-1] == written[:-1] else None
+                )
+                self._metadata_message_count = incoming_msg_count
+                break
+            else:
+                raise RuntimeError('Session changed repeatedly; refusing to overwrite')
+        finally:
+            tmp.unlink(missing_ok=True)
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1585,9 +1651,13 @@ class Session:
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
+        raw, save_signature = _read_save_snapshot(p)
+        data = json.loads(raw)
+        saved_message_count = len(data.get('messages') or [])
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        session._saved_count_identity = (save_signature, saved_message_count)
+        session._restore_draft()
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -1646,6 +1716,7 @@ class Session:
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
+            session._restore_draft()
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
             if sidecar_message_count is None:
@@ -1677,6 +1748,7 @@ class Session:
                 if _facts is not None:
                     parsed['anchor_scene_index'] = _facts.get('scene_index') or {}
                     session = cls(**parsed)
+                    session._restore_draft()
                     session._metadata_message_count = _parse_nonnegative_int(_facts.get('message_count'))
                     session._loaded_metadata_only = True
                     return session
