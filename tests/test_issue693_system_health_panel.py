@@ -72,7 +72,8 @@ def test_system_health_payload_normalizes_safe_aggregate_metrics(monkeypatch):
     assert payload["memory"] == {"used_bytes": 4000, "total_bytes": 10000, "percent": 40.0}
     assert payload["disk"] == {"used_bytes": 55500, "total_bytes": 100000, "percent": 55.5}
     assert payload["checked_at"]
-    rendered = repr(payload)
+    # Disk labels are intentionally exposed only by the authenticated panel.
+    rendered = repr({key: value for key, value in payload.items() if key != "disks"})
     for private_fragment in ("/home/", "/Users/", "mount", "path", "argv", "command", "env", "token"):
         assert private_fragment not in rendered
 
@@ -279,7 +280,7 @@ def test_system_health_panel_markup_and_styles_live_under_insights_not_top_chrom
     assert PANELS_JS.index('_renderSystemHealthPanel()') < PANELS_JS.index('_renderLlmWikiStatus(wikiStatus)')
     assert 'data-system-health-metric="cpu"' in PANELS_JS
     assert 'data-system-health-metric="memory"' in PANELS_JS
-    assert 'data-system-health-metric="disk"' in PANELS_JS
+    assert 'data-system-health-disk' in PANELS_JS
     assert ".system-health-panel.insights-card" in STYLE_CSS
     assert ".system-health-bar-fill" in STYLE_CSS
     assert ".system-health-panel.unavailable" in STYLE_CSS
@@ -307,7 +308,7 @@ def test_system_health_backend_uses_no_shell_or_private_process_sources():
     assert "os.environ" not in src
     assert "ps aux" not in src
     assert "/proc/self/environ" not in src
-    for private_field in ("argv", "cmdline", "username", "mountpoint"):
+    for private_field in ("argv", "cmdline", "username"):
         assert private_field not in src
 
 

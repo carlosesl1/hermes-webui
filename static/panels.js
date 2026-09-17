@@ -4473,15 +4473,15 @@ function _renderSystemHealthPanel() {
       <div class="system-health-metrics">
         <div class="system-health-metric" data-system-health-metric="cpu">
           <div class="system-health-label"><span>CPU</span><span class="system-health-value" data-system-health-value>—</span></div>
-          <div class="system-health-bar" role="progressbar" aria-label="CPU usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="system-health-bar-fill"></div></div>
+          <div class="system-health-bar" role="progressbar" aria-label="CPU usage" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Loading"><div class="system-health-bar-fill"></div></div>
         </div>
         <div class="system-health-metric" data-system-health-metric="memory">
           <div class="system-health-label"><span>RAM</span><span class="system-health-value" data-system-health-value>—</span></div>
-          <div class="system-health-bar" role="progressbar" aria-label="RAM usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="system-health-bar-fill"></div></div>
+          <div class="system-health-bar" role="progressbar" aria-label="RAM usage" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Loading"><div class="system-health-bar-fill"></div></div>
         </div>
-        <div class="system-health-metric" data-system-health-metric="disk">
+        <div class="system-health-metric" data-system-health-disk>
           <div class="system-health-label"><span>Disk</span><span class="system-health-value" data-system-health-value>—</span></div>
-          <div class="system-health-bar" role="progressbar" aria-label="Disk usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="system-health-bar-fill"></div></div>
+          <div class="system-health-bar" role="progressbar" aria-label="Disk usage" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Loading"><div class="system-health-bar-fill"></div></div>
         </div>
       </div>
       <div class="system-health-foot">Live snapshot only; historical resource charts can build on this surface later.</div>

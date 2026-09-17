@@ -1546,10 +1546,15 @@
   .system-health-dot{width:7px;height:7px;border-radius:999px;background:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);opacity:.88;}
   .system-health-panel.loading .system-health-dot{background:var(--muted);box-shadow:none;opacity:.55;}
   .system-health-status{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:700;border:1px solid var(--border);color:var(--muted);background:var(--surface);white-space:nowrap;}
-  .system-health-metrics{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:10px;min-width:0;}
+  .system-health-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,170px),1fr));gap:10px;min-width:0;}
   .system-health-metric{min-width:0;display:flex;flex-direction:column;gap:5px;padding:10px 11px;border:1px solid var(--border);border-radius:8px;background:var(--surface);}
   .system-health-label{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;line-height:1;color:var(--muted);}
   .system-health-value{font-variant-numeric:tabular-nums;color:var(--text);font-weight:650;}
+  .system-health-disk-name{min-width:0;overflow-wrap:anywhere;}
+  .system-health-value{flex-shrink:0;}
+  .system-health-disk-mount,.system-health-capacity{font-size:11px;line-height:1.4;overflow-wrap:anywhere;}
+  .system-health-disk-mount{font-family:var(--font-mono);}
+  .system-health-capacity{font-variant-numeric:tabular-nums;}
   .system-health-bar{height:5px;overflow:hidden;border-radius:999px;background:color-mix(in srgb,var(--border) 70%,transparent);border:1px solid color-mix(in srgb,var(--border) 75%,transparent);}
   .system-health-bar-fill{height:100%;width:0%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-hover));transition:width .25s ease;}
   .system-health-foot{font-size:11px;color:var(--muted);line-height:1.45;opacity:.82;}
