@@ -168,6 +168,18 @@ not OS page caches. It reports traced allocation separately from handler timings
 and verifies output/canonical hashes; it is not a wall-clock CI gate or production
 latency claim.
 
+For duplicate prevention, run the occurrence and settlement regression tests:
+`./scripts/test.sh tests/test_agent_occurrence_roundtrip.py tests/test_duplicate_settlement_boundaries.py`.
+`python tests/browser_duplicate_settlement.py` exercises incompatible history
+joins and clipped-final Worklog ownership in Chromium at 1440×900 and 522×1232.
+Set `DUPLICATE_BASELINE=704cb8c3` for an expected failing pre-fix run and
+`DUPLICATE_EVIDENCE` for screenshots/results. Its APIs and live projection at the
+clipped `done` boundary are controlled fixtures, not real-provider E2E.
+`HERMES_OCCURRENCE_CORE_DIR=/path/to/core python tests/probe_agent_occurrence_core.py`
+optionally checks actual core compaction/flush with temporary state and no provider;
+use that core's compatible interpreter/dependencies. See the linked reliability
+document for the exact scope and safe isolation requirements.
+
 ### Streaming reader intent
 
 While a response is still streaming, scroll upward with a trackpad or wheel to

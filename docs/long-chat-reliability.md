@@ -50,6 +50,72 @@ a regeneration revision, an authentication token, or occurrence deduplication.
 Canonical messages are not annotated or mutated. Old already-persisted previews
 without a fingerprint retain the legacy fail-closed behavior.
 
+## Duplicate-occurrence prevention
+
+The internal Agent replay projection preserves `message_uid` and `timestamp`,
+including the UID returned for the exact token/index-owned current-user checkpoint
+in eager and deferred save modes. These fields are distinct from WebUI stable IDs
+and physical SQLite row IDs. Row snapshots, persistence flags and write authority
+are not carried back to the Agent. Direct-provider sanitization still strips
+internal fields; the real-core compatibility probe also exercises the core's own
+wire-field stripper.
+
+Both state.db readers retain optional durable UIDs, with legacy-schema fallback.
+Reconciliation keeps conflicting UIDs as distinct occurrences and permits physical
+row churn when the durable UID agrees. Proven cross-source matches can enrich a
+legacy sidecar with its UID. It never deduplicates an entire conversation by text,
+overrides a conflicting checkpoint UID, or removes an existing duplicate as a
+repair operation. Equal user/assistant text in separate occurrences remains valid.
+
+Gap hydration now validates the right boundary of every page plus the join with
+any retained local prefix. Missing or incompatible boundaries reject the whole
+bridge; no partially fetched page mutates the incoming authoritative tail. Exact
+adjacency requires another overlapping page to prove the retained-prefix join,
+within the unchanged three-page/1,500-ms budget. Thus an ambiguous join may fall
+back more conservatively, preserving older-history access rather than displaying
+an overlapping user/assistant pair. Paging and settlement share the same canonical
+fingerprint/strict-legacy comparator.
+
+When a string-content final preview is genuinely clipped, settlement excludes the
+owning stream's last post-tool token accumulator from Worklog only when its text
+matches the preview prefix. Pre-tool narration and foreign-stream rows survive.
+Ambiguous structured/multi-block previews are not newly suppressed. This prevents
+one full streamed answer appearing in activity above its clipped final copy; it
+does not change canonical answer storage or grant truncation metadata authority
+to delete another occurrence.
+
+### Duplicate regression gates
+
+```sh
+./scripts/test.sh tests/test_agent_occurrence_roundtrip.py \
+  tests/test_duplicate_settlement_boundaries.py
+python tests/browser_duplicate_settlement.py
+# Same assertions must fail against the pre-fix frontend:
+DUPLICATE_BASELINE=704cb8c3 python tests/browser_duplicate_settlement.py
+# Optional installed-core compatibility, using its compatible Python/dependencies:
+HERMES_OCCURRENCE_CORE_DIR=/path/to/hermes-agent \
+  python tests/probe_agent_occurrence_core.py
+```
+
+The optional core probe establishes temporary HOME/config/SQLite before importing
+any runtime, disables lazy installation, and runs real compaction and incremental
+flush followed by WebUI reconciliation and save/reload. Under isolated `-I -S`,
+`HERMES_OCCURRENCE_DEPENDENCIES` can name existing ABI-compatible dependency paths.
+It does not call a provider or run a complete model conversation.
+
+The Chromium fixture uses real scripts, renderer, native EventSource listeners and
+backend preview projection at 1440×900 and 522×1232. APIs/boot are offline fixtures;
+its clipped-final case supplies a controlled live-scene projection at `done`,
+not a claim that every provider/reconnect assembles that state. It checks duplicate
+counts in both session state and settled DOM, preserved narration, final visibility,
+console errors and overflow, with nonzero exit on failures. `DUPLICATE_EVIDENCE`
+selects its screenshots/results location. The separate real-server lifecycle and
+cold-loading gates cover persistence/reload and actual older-page interaction.
+
+Existing persisted duplicates require a separate backed-up provenance-based repair.
+This source change neither migrates nor removes real history. Production model
+latency spikes and additional network/reconnect canaries remain follow-up work.
+
 ## Rendering caches
 
 - Long messages use the compact key only to locate a candidate. Full-source
