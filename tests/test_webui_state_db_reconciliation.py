@@ -7,6 +7,8 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from tests.render_window_assertions import assert_render_window_matches
+
 pytestmark = pytest.mark.requires_agent_modules
 
 
@@ -783,7 +785,7 @@ def test_msg_limit_session_load_reads_only_recent_state_db_tail(monkeypatch, tmp
     assert captured["since_timestamp"] == 200.0
     assert captured["row_count"] == 302
     messages = handler.response_json["session"]["messages"]
-    assert messages == expected_window
+    assert_render_window_matches(messages, expected_window)
     assert handler.response_json["session"]["_messages_offset"] == expected_offset
     assert messages[0]["content"] == "sidecar 472"
     assert messages[-2]["content"] == "external user"
@@ -841,7 +843,7 @@ def test_msg_limit_session_load_falls_back_with_null_state_db_timestamp(monkeypa
     assert captured["since_timestamp"] is None
     assert captured["row_count"] == 501
     session_payload = handler.response_json["session"]
-    assert session_payload["messages"] == expected_window
+    assert_render_window_matches(session_payload["messages"], expected_window)
     assert session_payload["message_count"] == len(full_all_messages)
     assert session_payload["_messages_offset"] == expected_offset
 
@@ -1137,7 +1139,7 @@ def test_msg_limit_session_load_bails_when_older_state_db_row_changes_offsets(mo
     assert handler.status == 200
     assert captured["since_timestamp"] is None
     session_payload = handler.response_json["session"]
-    assert session_payload["messages"] == expected_window
+    assert_render_window_matches(session_payload["messages"], expected_window)
     assert session_payload["message_count"] == len(full_all_messages)
     assert session_payload["_messages_offset"] == expected_offset
 
@@ -1190,7 +1192,7 @@ def test_msg_limit_session_load_bails_when_older_state_db_user_changes_offsets(m
     assert handler.status == 200
     assert captured["since_timestamp"] is None
     session_payload = handler.response_json["session"]
-    assert session_payload["messages"] == expected_window
+    assert_render_window_matches(session_payload["messages"], expected_window)
     assert session_payload["message_count"] == len(full_all_messages)
     assert session_payload["_messages_offset"] == expected_offset
 
@@ -1243,7 +1245,7 @@ def test_msg_limit_session_load_bails_when_prefloor_key_counts_mask_offset_chang
     assert handler.status == 200
     assert captured["since_timestamp"] is None
     session_payload = handler.response_json["session"]
-    assert session_payload["messages"] == expected_window
+    assert_render_window_matches(session_payload["messages"], expected_window)
     assert session_payload["message_count"] == len(full_all_messages)
     assert session_payload["_messages_offset"] == expected_offset
     assert len(full_all_messages) == len(sidecar_messages) + 1
@@ -1306,7 +1308,7 @@ def test_msg_limit_session_load_bails_when_prefloor_tool_calls_mask_offset_chang
     assert handler.status == 200
     assert captured["since_timestamp"] is None
     session_payload = handler.response_json["session"]
-    assert session_payload["messages"] == expected_window
+    assert_render_window_matches(session_payload["messages"], expected_window)
     assert session_payload["message_count"] == len(full_all_messages)
     assert session_payload["_messages_offset"] == expected_offset
     assert len(full_all_messages) == len(sidecar_messages) + 1
