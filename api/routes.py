@@ -9071,6 +9071,7 @@ def _limited_webui_messages_for_display_with_sidecar(
     *,
     state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
     msg_before=None,
+    _comparison_cache=None,
 ) -> list:
     if sidecar_messages is None:
         sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
@@ -9137,6 +9138,7 @@ def _limited_webui_messages_for_display_with_sidecar(
         state_db_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+        _comparison_cache=_comparison_cache,
     )
     if cache_key is not None:
         _state_key = cache_key[4]
@@ -9564,7 +9566,9 @@ def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
         return False
 
 
-def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
+def _state_db_since_timestamp_for_limited_display(
+    session, msg_limit, msg_before=None, *, _comparison_cache=None,
+):
     """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
 
     The display window limit counts visible transcript rows after WebUI sidecar
@@ -9617,8 +9621,9 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     if sidecar_before_count == 0:
         return floor, sidecar_messages
 
+    comparison_kwargs = {"_comparison_cache": _comparison_cache} if _comparison_cache is not None else {}
     sidecar_before_keys = [
-        _session_message_visible_key(msg)
+        _session_message_visible_key(msg, **comparison_kwargs)
         for msg, ts in zip(sidecar_messages, sidecar_timestamps, strict=True)
         if ts < floor
     ]
@@ -9626,6 +9631,7 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         getattr(session, "session_id", None),
         floor,
         profile=getattr(session, "profile", None) or None,
+        _comparison_cache=_comparison_cache,
     )
     if state_before_keys is None or state_before_keys != sidecar_before_keys:
         return None, sidecar_messages
@@ -12954,6 +12960,9 @@ def _handle_session_get(handler, parsed) -> bool:
         state_db_messages = []
         metadata_summary = None
         limited_sidecar_messages = None
+        # Pure text memo only: share prefix-proof work with reconciliation, then
+        # release at request exit. No row identities or cache-validity decisions.
+        _comparison_cache = {}
         state_db_since_timestamp = None
         # Set by the limited-display path when the memoized merge can be
         # reused without loading the state.db rows; must exist for every
@@ -12971,6 +12980,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     s,
                     msg_limit,
                     msg_before=msg_before,
+                    _comparison_cache=_comparison_cache,
                 )
             _state_db_reader_kwargs = {"profile": _session_profile}
             if state_db_since_timestamp is not None:
@@ -13063,6 +13073,7 @@ def _handle_session_get(handler, parsed) -> bool:
                         state_db_messages,
                         state_db_signature=_display_state_db_signature,
                         msg_before=msg_before,
+                        _comparison_cache=_comparison_cache,
                     )
             else:
                 _all_msgs = merge_session_messages_append_only(

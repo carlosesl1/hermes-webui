@@ -8688,6 +8688,7 @@ def get_state_db_session_message_keys_before_timestamp(
     before_timestamp,
     *,
     profile=None,
+    _comparison_cache=None,
 ) -> list[tuple] | None:
     """Return visible-identity keys before ``before_timestamp`` in DB order.
 
@@ -8748,6 +8749,7 @@ def get_state_db_session_message_keys_before_timestamp(
                         "api_content": row["api_content"] if "api_content" in available else None,
                     },
                     normalize_workspace_prefix=True,
+                    _comparison_cache=_comparison_cache,
                 )
                 for row in cur.fetchall()
             ]
@@ -9909,14 +9911,17 @@ def _normalized_session_message_content(msg: dict) -> str:
 def _session_message_comparison_content(
     msg: dict, *, normalize_workspace_prefix: bool, cache=None,
 ) -> str:
-    """Normalize once per prepared row within an append-only merge.
+    """Reuse pure text normalization within ONE merge or display request.
 
-    The optional cache belongs to ONE invocation, whose prepared dicts are
-    retained and whose content is stable. Never store it on a Session or use
-    it across requests: edits can retain object identity/length/timestamp.
-    Literal sidecar workspace tags and state.db protocol tags remain distinct.
+    Key by exact input text, not row identity: prefix-proof DB rows are temporary
+    dicts, and different occurrences may carry the same text. This cache stores
+    no identity/reconciliation decisions; UID, role, tools and provenance are
+    still checked independently by every caller. Never retain it on a Session
+    or in the display caches. Literal sidecar workspace tags and state.db
+    protocol tags remain distinct.
     """
-    key = (id(msg), False)
+    raw_content = str(msg.get("content") or "")
+    key = (raw_content, False)
     if cache is not None and key in cache:
         content = cache[key]
     else:
@@ -9924,7 +9929,7 @@ def _session_message_comparison_content(
         if cache is not None:
             cache[key] = content
     if normalize_workspace_prefix and str(msg.get("role") or "") == "user":
-        state_key = (id(msg), True)
+        state_key = (raw_content, True)
         if cache is not None and state_key in cache:
             return cache[state_key]
         from api.streaming import _strip_workspace_prefix
@@ -10377,6 +10382,7 @@ def merge_session_messages_append_only(
     *,
     truncation_watermark=None,
     truncation_boundary=None,
+    _comparison_cache=None,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -10435,7 +10441,7 @@ def merge_session_messages_append_only(
     _MESSAGE_CACHE_MISSING = object()
     _cached_msg_prepared: dict[int, dict[str, object]] = {}
     _cached_msg_keys: dict[tuple[int, str], object] = {}
-    _comparison_content_cache: dict[tuple[int, bool], str] = {}
+    _comparison_content_cache = _comparison_cache if _comparison_cache is not None else {}
     ambiguous_timestamp_keys = set()
 
     _message_key_helpers = {
