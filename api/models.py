@@ -1671,7 +1671,14 @@ class Session:
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
         raw, save_signature = _read_save_snapshot(p)
-        data = json.loads(raw)
+        # Match json.loads(bytes)' encoding/error semantics, but release the
+        # binary snapshot BEFORE allocating parsed strings/containers. Keeping
+        # all three whole-file representations multiplies cold-load memory.
+        raw = raw.decode(json.detect_encoding(raw), 'surrogatepass')
+        # Use the decoder directly, just like loads(bytes) after decoding;
+        # loads(str) would add a different error for an embedded second BOM.
+        data = json.JSONDecoder().decode(raw)
+        del raw
         saved_message_count = len(data.get('messages') or [])
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
@@ -9861,6 +9868,39 @@ def _normalized_session_message_content(msg: dict) -> str:
     return " ".join(str(msg.get("content") or "").split())
 
 
+def _session_message_comparison_content(
+    msg: dict, *, normalize_workspace_prefix: bool, cache=None,
+) -> str:
+    """Normalize once per prepared row within an append-only merge.
+
+    The optional cache belongs to ONE invocation, whose prepared dicts are
+    retained and whose content is stable. Never store it on a Session or use
+    it across requests: edits can retain object identity/length/timestamp.
+    Literal sidecar workspace tags and state.db protocol tags remain distinct.
+    """
+    key = (id(msg), False)
+    if cache is not None and key in cache:
+        content = cache[key]
+    else:
+        content = _normalized_session_message_content(msg)
+        if cache is not None:
+            cache[key] = content
+    if normalize_workspace_prefix and str(msg.get("role") or "") == "user":
+        state_key = (id(msg), True)
+        if cache is not None and state_key in cache:
+            return cache[state_key]
+        from api.streaming import _strip_workspace_prefix
+
+        stripped = _strip_workspace_prefix(content, include_legacy=True)
+        # The base is already whitespace-normalized. Avoid allocating another
+        # split list/string when there was no protocol wrapper to remove.
+        if stripped != content:
+            content = " ".join(stripped.split())
+        if cache is not None:
+            cache[state_key] = content
+    return content
+
+
 def _loose_session_message_content(value: str) -> str:
     return " ".join(re.findall(r"\w+", str(value or "").casefold()))
 
@@ -9869,31 +9909,15 @@ def _session_message_content_key(
     msg: dict,
     *,
     normalize_workspace_prefix: bool = True,
+    _comparison_cache=None,
 ):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
     role = str(msg.get("role") or "")
-    content = _normalized_session_message_content(msg)
-    if role == "user" and normalize_workspace_prefix:
-        # WebUI sends the model a workspace-prefixed user_message
-        # ("[Workspace::v1: /path]\n<text>") while the visible/optimistic
-        # bubble and the WebUI sidecar row carry only the bare "<text>". The
-        # streaming dedup identity (_message_identity in api/streaming.py)
-        # strips this prefix for user turns, so this reconciliation key must
-        # do the same. Otherwise a state.db row (prefixed) and a sidecar row
-        # (bare) key DIFFERENTLY, the alignment loop in
-        # state_db_delta_after_context fails to match them, treats the
-        # state.db copy as a NEW row, and appends a duplicate user turn. The
-        # agent then merges the two adjacent user rows into a permanent
-        # composite -- the post-restart stale-user-prepend bug (#5339). Reuse
-        # the SAME helper as the streaming side (imported lazily to avoid a
-        # circular import; api.streaming imports api.models at module load) so
-        # the two dedup layers can't drift apart again.
-        from api.streaming import _strip_workspace_prefix
-
-        content = " ".join(
-            _strip_workspace_prefix(content, include_legacy=True).split()
-        )
+    content = _session_message_comparison_content(
+        msg, normalize_workspace_prefix=normalize_workspace_prefix,
+        cache=_comparison_cache,
+    )
     return _session_message_key_with_sidecar((
         role,
         content,
@@ -9906,6 +9930,7 @@ def _session_message_visible_key(
     msg: dict,
     *,
     normalize_workspace_prefix: bool = False,
+    _comparison_cache=None,
 ):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
@@ -9916,17 +9941,10 @@ def _session_message_visible_key(
     _tc = msg.get("tool_calls")
     _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
     role = str(msg.get("role") or "")
-    content = _normalized_session_message_content(msg)
-    if role == "user" and normalize_workspace_prefix:
-        # state.db stores the model-facing workspace-prefixed prompt while the
-        # WebUI sidecar owns the bare visible text. Fold that protocol wrapper
-        # into the exact key so large-session reconciliation does not depend on
-        # the bounded fuzzy fallback to recognize one logical turn.
-        from api.streaming import _strip_workspace_prefix
-
-        content = " ".join(
-            _strip_workspace_prefix(content, include_legacy=True).split()
-        )
+    content = _session_message_comparison_content(
+        msg, normalize_workspace_prefix=normalize_workspace_prefix,
+        cache=_comparison_cache,
+    )
     return _session_message_key_with_sidecar((
         role,
         content,
@@ -10379,22 +10397,27 @@ def merge_session_messages_append_only(
     _MESSAGE_CACHE_MISSING = object()
     _cached_msg_prepared: dict[int, dict[str, object]] = {}
     _cached_msg_keys: dict[tuple[int, str], object] = {}
+    _comparison_content_cache: dict[tuple[int, bool], str] = {}
     ambiguous_timestamp_keys = set()
 
     _message_key_helpers = {
         "merge": _session_message_merge_key,
         "dedup": _session_message_dedup_key,
         "content_sidecar": lambda msg: _session_message_content_key(
-            msg, normalize_workspace_prefix=False
+            msg, normalize_workspace_prefix=False,
+            _comparison_cache=_comparison_content_cache,
         ),
         "content_state": lambda msg: _session_message_content_key(
-            msg, normalize_workspace_prefix=True
+            msg, normalize_workspace_prefix=True,
+            _comparison_cache=_comparison_content_cache,
         ),
         "visible_sidecar": lambda msg: _session_message_visible_key(
-            msg, normalize_workspace_prefix=False
+            msg, normalize_workspace_prefix=False,
+            _comparison_cache=_comparison_content_cache,
         ),
         "visible_state": lambda msg: _session_message_visible_key(
-            msg, normalize_workspace_prefix=True
+            msg, normalize_workspace_prefix=True,
+            _comparison_cache=_comparison_content_cache,
         ),
     }
 
