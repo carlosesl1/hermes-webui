@@ -764,14 +764,17 @@ function _messageVirtualHeightPrefixEntryMatches(previousEntry, nextEntry){
   );
 }
 function _syncMessageVirtualHeightCache(visWithIdx){
-  const nextEntries=Array.isArray(visWithIdx)
-    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
-    : [];
+  // This runs on every scroll-window probe. Check the cache before allocating
+  // one metadata object per loaded row; unchanged history needs no traversal.
+  const nextLength=Array.isArray(visWithIdx)?visWithIdx.length:0;
   if(
     _messageVirtualHeightCacheLen===S.messages.length &&
     _messageVirtualHeightCacheSrc===S.messages &&
-    _messageVirtualHeightCacheEntries.length===nextEntries.length
+    _messageVirtualHeightCacheEntries.length===nextLength
   ) return;
+  const nextEntries=Array.isArray(visWithIdx)
+    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
+    : [];
   const previousEntries=Array.isArray(_messageVirtualHeightCacheEntries)?_messageVirtualHeightCacheEntries:[];
   const previousHeights=Array.isArray(_messageVirtualHeightCache)?_messageVirtualHeightCache.slice():[];
   let nextHeights=null;
@@ -1531,20 +1534,31 @@ function _renderCacheKey(text, isUser){
   // setting invalidates cached plain-text renders (#3870).
   const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
   // Short content: use the full string as key (cheap Map lookup).
-  // Long content: length + prefix + suffix is good enough — collisions on
-  // 20-char prefix+suffix are vanishingly rare for chat messages.
+  // Long content: use a compact candidate key, NOT an equality proof. Repeated
+  // templates/code can have identical lengths and edges but different middles.
+  // _getCachedRender checks the complete source before reusing the HTML.
   if(text.length <= 500) return p + ':' + text;
   return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
 }
 function _getCachedRender(text, isUser){
   const key = _renderCacheKey(text, isUser);
   const hit = _renderCache.get(key);
-  if(hit !== undefined) return hit;
+  if(hit !== undefined && hit.text === text){
+    // Refresh recency so paging in one old row does not evict the hot tail.
+    _renderCache.delete(key);
+    _renderCache.set(key, hit);
+    return hit.html;
+  }
   const rendered = isUser
     ? (window._renderUserMarkdown ? renderMd(text) : _renderUserFencedBlocks(text))
     : renderMd(_stripXmlToolCallsDisplay(String(text)));
-  if(_renderCache.size > _renderCacheMax) _renderCache.clear();
-  _renderCache.set(key, rendered);
+  _renderCache.delete(key);
+  _renderCache.set(key, {text,html:rendered});
+  // Evict only the coldest entry, rather than reparsing the whole visible
+  // window after the cache fills. Keep the existing capacity as a hard bound.
+  while(_renderCache.size > _renderCacheMax){
+    _renderCache.delete(_renderCache.keys().next().value);
+  }
   return rendered;
 }
 // ── Message-level media snapshot stamping ─────────────────────────────────
@@ -15660,9 +15674,9 @@ function clearMessageRenderCache(){
 // constant-allocation cost: strings are streamed char-by-char (no copy) and
 // object fields are walked key-by-key so only scalar string forms are ever
 // allocated — no integral JSON.stringify() of a whole payload, and no
-// head/tail slice copies. _renderCacheKey's length+edges shortcut is only
-// safe for the render-window geometry key, where equal span+edges means
-// equal window; here equal signature must mean equal CONTENT.
+// head/tail slice copies. Unlike _getCachedRender's candidate lookup followed
+// by an exact source comparison, this signature has no equality backstop and
+// must include the complete content.
 function _addBoundedHash(add, value, depth){
   if(value==null){ add('null'); return; }
   const t=typeof value;
