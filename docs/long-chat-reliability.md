@@ -2,7 +2,8 @@
 
 ## Contract routing
 
-This change affects browser settlement/presentation and read-only journal replay.
+This change affects browser settlement/presentation, read-only journal replay,
+and cold session decoding/reconciliation.
 It preserves the canonical transcript, provider context, occurrence identity, and
 existing stable-assistant-turn ownership. Relevant contracts: `CONTRACTS.md`,
 `rfcs/live-to-final-assistant-replies.md`,
@@ -74,6 +75,58 @@ Memory is proportional to read chunks, the largest logical row, returned events,
 and retained diagnostics, rather than every discarded event payload. CPU and I/O
 remain O(file size); cold summaries and multi-run traversal are not newly indexed.
 
+## Cold session loading
+
+A small HTTP tail does not avoid loading a large native sidecar. Profiling a
+synthetic sidecar plus state.db showed repeated comparison-text normalization in
+reconciliation was more expensive than JSON parsing. The append-only merger now
+shares normalized content between its comparison keys within ONE invocation.
+Prepared dictionaries stay alive and their content stays fixed while that cache
+is used. The cache is not attached to a Session, shared between requests, keyed
+by file size/timestamp, or reused after an edit. Literal workspace tags in the
+sidecar and protocol prefixes in state.db retain their different semantics;
+provider sidecars and occurrence/truncation rules are unchanged.
+
+`Session.load` releases its binary snapshot before parsing the decoded JSON and
+releases decoded text before reconciliation. Encoding, surrogate handling, and
+malformed-input exception behavior match `json.loads(bytes)`, including BOMs.
+The original snapshot save signature and atomic-replacement checks are retained.
+This lowers temporary allocation; it is NOT partial-file parsing, constant-memory
+history loading, a schema migration, or a persisted history cache.
+
+### Measured scope
+
+One five-trial synthetic comparison against the previous implementation used
+3,000 messages, a 33,179,079-byte sidecar and a synthetic SQLite database. The same
+script/interpreter ran against both checkouts. Application caches were cleared
+per trial; the OS page cache was not. Canonical sidecar and output SHA-256 values
+were identical before and after.
+
+| Case | Median before | Median after |
+| --- | ---: | ---: |
+| Tail with matching older prefix | 1.7214 s | 1.2556 s |
+| Older page with matching prefix | 2.1820 s | 1.2690 s |
+| Tail requiring older-prefix reconciliation | 2.8825 s | 1.6701 s |
+| Older page requiring older-prefix reconciliation | 2.5059 s | 1.0418 s |
+| `Session.load` peak traced allocation | 100,444,581 bytes | 67,266,295 bytes |
+
+The allocation reduction was 33.03%. Timings varied between trials on a shared
+host; these are observed handler medians, not a guaranteed production speedup,
+end-to-end browser latency, disk-cold benchmark or whole-process RSS limit.
+
+`tests/test_cold_chat_loading_cost.py` enforces normalization count and allocation
+cost without clock thresholds. It also checks JSON compatibility, edited-input
+freshness, and 500 deterministically seeded comparisons to the uncached semantics.
+Neighboring gates cover occurrences, provider `api_content`, state.db recovery,
+save identity/concurrent replacement, truncation, and compression.
+
+`tests/browser_cold_chat_loading.py` starts a real isolated WebUI with a persisted
+3,000-message fixture, opens the 30-row tail, clicks older-history pagination,
+navigates A → B → back to A, and reloads at 1440×900 and 522×1232. It checks the
+saved answer, coordinates, horizontal overflow, uncaught JavaScript errors and
+unchanged canonical bytes. This is persisted-history browser coverage, not a live
+provider or in-flight session-switch race test.
+
 ## Reproduction and verification
 
 Use the supported repository runner with isolated HOME/Hermes/WebUI state:
@@ -115,10 +168,10 @@ latency or whole-process memory claim.
 
 ## Follow-up work, not claimed as shipped
 
-1. Measure cold sidecar parsing separately from HTTP window size. A 30-row response
-   does not prove that a large JSON sidecar avoided full parsing. Evaluate a
-   revision-aware, indexed read projection without migrating canonical history
-   until concurrency, freshness, and compatibility are covered.
+1. Cold-load decoding and normalization costs have been reduced, but the full
+   sidecar still gets parsed. Evaluate a revision-aware, indexed read projection
+   without migrating canonical history until concurrency, freshness, and
+   compatibility are covered.
 2. Profile the temporary full render-window expansion during settlement with
    very large histories before changing stable-worklog/scroll contracts.
 3. Test interrupted networks, hidden/mobile tabs, multiple tabs, server restart,

@@ -154,6 +154,20 @@ reader/focus preservation. Both use offline HTTP fixtures with production assets
 run `tests/browser_conversation_lifecycle.py` separately for the real isolated
 server/Gateway lifecycle. These are not real-provider E2E claims.
 
+For cold session loading, run `./scripts/test.sh tests/test_cold_chat_loading_cost.py`
+with isolated HOME/Hermes/WebUI state. With Playwright available, run
+`python tests/browser_cold_chat_loading.py`; it creates/removes isolated persisted
+sessions and a local server, checking tail/older paging, route navigation and
+reload at desktop and narrow widths. Set `COLD_BROWSER_EVIDENCE` to retain its
+screenshots/results in a chosen directory. No live provider is called.
+
+`python tests/benchmark_cold_chat_loading.py --repo /path/to/checkout --output result.json`
+is an opt-in synthetic benchmark. Use the same script and interpreter for both
+checkouts; default is five trials and 3,000 messages. It clears application caches,
+not OS page caches. It reports traced allocation separately from handler timings
+and verifies output/canonical hashes; it is not a wall-clock CI gate or production
+latency claim.
+
 ### Streaming reader intent
 
 While a response is still streaming, scroll upward with a trackpad or wheel to
