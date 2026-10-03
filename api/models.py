@@ -8469,6 +8469,7 @@ def get_state_db_session_messages(
                 # sidecar in the WebUI's internal history; the provider-safe
                 # projection strips it before any direct API request.
                 'api_content',
+                'message_uid',
             ]
             id_col = ['id'] if 'id' in available else []
             revision_cols = []
@@ -8860,7 +8861,7 @@ def get_state_db_regeneration_tail_snapshot(
             optional = [
                 'tool_call_id', 'tool_calls', 'tool_name', 'reasoning',
                 'reasoning_details', 'codex_reasoning_items', 'reasoning_content',
-                'codex_message_items', 'api_content',
+                'codex_message_items', 'api_content', 'message_uid',
             ]
             tail_select = ['id', 'role', 'content', 'timestamp'] if 'id' in available else ['role', 'content', 'timestamp']
             for col in optional + (['active'] if 'active' in available else []):
@@ -9139,6 +9140,13 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
     """Preserve display-only turn metadata when duplicate transcript rows merge."""
     if not isinstance(target, dict) or not isinstance(source, dict):
         return
+    # A proven replay may enrich an old WebUI row with its durable occurrence
+    # identity. Do not copy physical-row authority or overwrite a conflicting UID.
+    source_uid, source_uid_valid = _message_uid_details(source)
+    if (source_uid_valid and source_uid is not None
+            and not target.get("message_uid")
+            and _message_private_identity_compatible(target, source)):
+        target["message_uid"] = source_uid
     for key in _SESSION_MESSAGE_DISPLAY_METADATA_KEYS:
         if _message_display_metadata_value_present(target.get(key)):
             continue
@@ -9213,6 +9221,17 @@ def _stable_message_identity_details(message: dict | None) -> tuple[str | None, 
     return (next(iter(values)) if values else None), True
 
 
+def _message_uid_details(message: dict | None) -> tuple[str | None, bool]:
+    """Core durable occurrence UID, distinct from WebUI ids and physical row ids.
+
+    Match the core's non-empty string contract without coercing malformed IDs.
+    """
+    value = message.get("message_uid") if isinstance(message, dict) else None
+    if value is None or value == "":
+        return None, True
+    return (value, True) if isinstance(value, str) else (None, False)
+
+
 def _message_occurrence_key(message):
     """Session-local provenance, never content or wall-clock coincidence.
 
@@ -9223,9 +9242,12 @@ def _message_occurrence_key(message):
         return ('unidentified', id(message))
     stable, stable_valid = _stable_message_identity_details(message)
     row, row_valid = _state_db_row_identity_details(message)
-    if not stable_valid or not row_valid:
+    uid, uid_valid = _message_uid_details(message)
+    if not stable_valid or not row_valid or not uid_valid:
         return ('unidentified', id(message))
     scope = (message.get('_source'), message.get('_active_turn_token'))
+    if uid is not None:
+        return ('message-uid', uid, scope)
     if row is not None:
         return ('state-row', row, scope)
     if stable is not None:
@@ -9288,11 +9310,19 @@ def _message_private_identity_compatible(target: dict | None, source: dict | Non
         return False
     if target_stable is not None and source_stable is not None and target_stable != source_stable:
         return False
+    target_uid, target_uid_valid = _message_uid_details(target)
+    source_uid, source_uid_valid = _message_uid_details(source)
+    if not target_uid_valid or not source_uid_valid:
+        return False
+    if target_uid is not None and source_uid is not None and target_uid != source_uid:
+        return False
     target_row_id, target_row_id_valid = _state_db_row_identity_details(target)
     source_row_id, source_row_id_valid = _state_db_row_identity_details(source)
     if not target_row_id_valid or not source_row_id_valid:
         return False
-    if target_row_id is not None and source_row_id is not None and target_row_id != source_row_id:
+    if (target_row_id is not None and source_row_id is not None
+            and target_row_id != source_row_id
+            and not (target_uid is not None and target_uid == source_uid)):
         return False
     target_api_content = _session_message_api_content_key(target)
     source_api_content = _session_message_api_content_key(source)
@@ -9311,11 +9341,19 @@ def _message_identity_compatible(target: dict | None, source: dict | None) -> bo
         return False
     if target_stable is not None and source_stable is not None and target_stable != source_stable:
         return False
+    target_uid, target_uid_valid = _message_uid_details(target)
+    source_uid, source_uid_valid = _message_uid_details(source)
+    if not target_uid_valid or not source_uid_valid:
+        return False
+    if target_uid is not None and source_uid is not None and target_uid != source_uid:
+        return False
     target_row_id, target_row_id_valid = _state_db_row_identity_details(target)
     source_row_id, source_row_id_valid = _state_db_row_identity_details(source)
     if not target_row_id_valid or not source_row_id_valid:
         return False
-    if target_row_id is not None and source_row_id is not None and target_row_id != source_row_id:
+    if (target_row_id is not None and source_row_id is not None
+            and target_row_id != source_row_id
+            and not (target_uid is not None and target_uid == source_uid)):
         return False
     return _visible_content_compatible(target, source)
 

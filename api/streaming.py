@@ -5546,6 +5546,7 @@ def _sanitize_messages_for_api(
     effective_provider: str | None = None,
     effective_base_url: str | None = None,
     preserve_api_content: bool = False,
+    preserve_occurrence_identity: bool = False,
     requested_provider: str = "",
 ):
     """Return a deep copy of messages with only API-safe fields.
@@ -5629,6 +5630,14 @@ def _sanitize_messages_for_api(
             preserve_message_api_content=preserve_api_content,
             message_records=True,
         )[0]
+        if preserve_occurrence_identity:
+            # Internal Agent history is not a provider payload. The current core
+            # carries these through flush/compaction and strips them at its wire
+            # boundary (agent.message_metadata). Never replay row snapshots or
+            # persisted flags: they authorize writes/skips against a physical row.
+            for key in ("timestamp", "message_uid"):
+                if key in msg:
+                    sanitized[key] = copy.deepcopy(msg[key])
         if sanitized.get("role") not in {"user", "assistant"}:
             sanitized.pop("api_content", None)
         elif not isinstance(sanitized.get("api_content"), str) or not sanitized.get("api_content"):
@@ -5725,7 +5734,7 @@ def _sanitize_messages_for_agent(
     effective_base_url: str | None = None,
     requested_provider: str = "",
 ):
-    """Build the internal Agent replay projection with ``api_content`` intact.
+    """Build internal Agent history with provider sidecar and occurrence identity.
 
     ``api_content`` is a durable provider-facing sidecar, not a direct-provider
     payload field.  Keep this opt-in at one named boundary so every Agent
@@ -5739,6 +5748,7 @@ def _sanitize_messages_for_agent(
         effective_provider=effective_provider,
         effective_base_url=effective_base_url,
         preserve_api_content=True,
+        preserve_occurrence_identity=True,
         requested_provider=requested_provider,
     )
 
