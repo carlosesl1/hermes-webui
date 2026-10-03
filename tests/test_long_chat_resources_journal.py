@@ -22,17 +22,20 @@ def _path(root):
     return root / "_run_journal" / "session" / "run.jsonl"
 
 
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n", b"\r"])
 @pytest.mark.parametrize("after_seq,max_seq,expected", [
     (1198, None, [1199, 1200]),
     (1, 3, [2, 3]),
 ])
-def test_cursor_replay_does_not_retain_discarded_payloads(tmp_path, after_seq, max_seq, expected):
+def test_cursor_replay_does_not_retain_discarded_payloads(tmp_path, after_seq, max_seq, expected, newline):
     # About 10 MB on disk, created through the production writer. Only reader
     # allocations are traced; timing is reported, never used as a flaky gate.
     text = "x" * 8192
     for _ in range(1200):
         _append(tmp_path, text)
     path = _path(tmp_path)
+    if newline != b"\n":
+        path.write_bytes(path.read_bytes().replace(b"\n", newline))
     before = hashlib.sha256(path.read_bytes()).digest()
     tracemalloc.start()
     started = time.perf_counter()
@@ -122,6 +125,23 @@ def test_legacy_line_endings_utf8_and_unterminated_tail(tmp_path, newline):
     assert replay["events"] == [first, second]
     assert replay["malformed"] == [{"line": 3, "raw": "{partial"}]
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 7, 65536])
+def test_incremental_line_reader_matches_splitlines_at_utf8_and_crlf_boundaries(chunk_size):
+    import io
+
+    class ShortReads(io.BytesIO):
+        def read(self, size: int | None = -1):
+            return super().read(chunk_size if size is None or size < 0 else min(size, chunk_size))
+
+    text = "ação 中文\r\n\r\n\rsecond\rthird\n\n🙂\u2028last\u0085\x1cend"
+    raw = text.encode("utf-8")
+    assert list(run_journal._journal_lines(ShortReads(raw), len(raw))) == text.splitlines()
+    # A large logical line is assembled once, not retained as a whole file.
+    large = "x" * 70000 + "🙂\r\nfinal\r"
+    raw = large.encode("utf-8")
+    assert list(run_journal._journal_lines(io.BytesIO(raw), len(raw))) == large.splitlines()
 
 
 def test_reader_closes_descriptor_when_cursor_conversion_raises(tmp_path, monkeypatch):

@@ -5,6 +5,7 @@ the existing in-process streaming path without changing execution ownership.
 """
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import re
@@ -150,6 +151,40 @@ def _discard_cached_summary(path: Path) -> None:
         _SUMMARY_CACHE.pop(str(path), None)
 
 
+def _journal_lines(fh, remaining: int):
+    """Incremental UTF-8/splitlines reader, including legacy CR-only journals."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    fragments: list[str] = []
+    skip_lf = False
+    endings = ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+    while remaining > 0:
+        chunk = fh.read(min(remaining, 64 * 1024))
+        remaining -= len(chunk)
+        if not chunk:
+            remaining = 0
+        text = decoder.decode(chunk, final=remaining == 0)
+        for part in text.splitlines(keepends=True):
+            if skip_lf:
+                skip_lf = False
+                if part.startswith("\n"):
+                    part = part[1:]
+                    if not part:
+                        continue
+            if part.endswith(endings):
+                skip_lf = part.endswith("\r")
+                raw = part[:-2] if part.endswith("\r\n") else part[:-1]
+                if fragments:
+                    fragments.append(raw)
+                    yield "".join(fragments)
+                    fragments.clear()
+                else:
+                    yield raw
+            else:
+                fragments.append(part)
+    if fragments:
+        yield "".join(fragments)
+
+
 def _read_jsonl(
     path: Path, *, after_seq: int | None = None, max_seq: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
@@ -168,32 +203,22 @@ def _read_jsonl(
     except FileNotFoundError:
         return events, malformed
     with fh:
-        remaining = os.fstat(fh.fileno()).st_size
-        line_no = 0
-        while remaining > 0:
-            line = fh.readline(remaining)
-            if not line:
-                break
-            remaining -= len(line)
-            # Preserve the legacy splitlines diagnostic/line-number semantics
-            # (including CR-only imports) without materialising the whole file.
-            for raw in line.decode("utf-8").splitlines():
-                line_no += 1
-                if not raw.strip():
-                    continue
-                try:
-                    parsed = json.loads(raw)
-                except json.JSONDecodeError:
-                    malformed.append({"line": line_no, "raw": raw})
-                    continue
-                if not isinstance(parsed, dict):
-                    malformed.append({"line": line_no, "raw": raw})
-                    continue
-                if after_seq is not None and int(parsed.get("seq") or 0) <= int(after_seq):
-                    continue
-                if max_seq is not None and int(parsed.get("seq") or 0) > int(max_seq):
-                    continue
-                events.append(parsed)
+        for line_no, raw in enumerate(_journal_lines(fh, os.fstat(fh.fileno()).st_size), start=1):
+            if not raw.strip():
+                continue
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                malformed.append({"line": line_no, "raw": raw})
+                continue
+            if not isinstance(parsed, dict):
+                malformed.append({"line": line_no, "raw": raw})
+                continue
+            if after_seq is not None and int(parsed.get("seq") or 0) <= int(after_seq):
+                continue
+            if max_seq is not None and int(parsed.get("seq") or 0) > int(max_seq):
+                continue
+            events.append(parsed)
     return events, malformed
 
 
