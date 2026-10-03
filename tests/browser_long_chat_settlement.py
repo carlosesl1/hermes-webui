@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import re
+import runpy
 import subprocess
 import tempfile
 from pathlib import Path
@@ -27,6 +28,12 @@ def main():
     rows = [{"role": "assistant" if i % 2 else "user", "content": f"Historical message {i}", "timestamp": i + 1} for i in range(100)]
     rows += [{"role": "tool", "content": f"Tool result {i}", "timestamp": 101 + i} for i in range(89)]
     rows += [{"role": "assistant", "content": FINAL, "timestamp": 190}]
+    projected = os.environ.get("LONG_CHAT_PROJECTED") == "1"
+    project = runpy.run_path(str(ROOT / "api/render_payload.py"))["bounded_render_messages"]
+    if projected:
+        rows[:-1] = [{"role": "assistant", "timestamp": i + 1, "content": [
+            {"type": "text", "text": f"Historical block {i}: " + "word " * 1800} for _ in range(4)
+        ]} for i in range(len(rows) - 1)]
     results = []
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -49,12 +56,20 @@ def main():
                     file = ROOT / path.lstrip("/")
                     route.fulfill(body=old if old is not None and file.name == "messages.js" else file.read_bytes(), content_type=mimetypes.guess_type(file)[0] or "application/octet-stream")
                 elif path == "/api/chat/stream":
-                    payload = {"status": "completed", "session": {"session_id": "settlement-proof", "_settlement_window": "tail_v1", "_messages_offset": 160, "message_count": len(rows), "messages": rows[160:], "tool_calls": []}}
+                    payload = {"status": "completed", "session": {"session_id": "settlement-proof", "_settlement_window": "tail_v1", "_messages_offset": 160, "message_count": len(rows), "messages": project(rows[160:], settlement=True) if projected else rows[160:], "tool_calls": []}}
                     body = "event: done\ndata: " + json.dumps(payload) + "\n\nevent: stream_end\ndata: {}\n\n"
                     route.fulfill(body=body, content_type="text/event-stream")
                 elif path == "/api/session" and "msg_before" in parse_qs(url.query):
                     gap_calls.append(request.url)
-                    route.fulfill(status=503, json={"error": "Fixture: history temporarily unavailable"})
+                    if not projected or len(gap_calls) == 1:
+                        route.fulfill(status=503, json={"error": "Fixture: history temporarily unavailable"})
+                    else:
+                        before = int(parse_qs(url.query)["msg_before"][0])
+                        start = max(0, before - 30)
+                        route.fulfill(json={"session": {"session_id": "settlement-proof",
+                            "messages": project(rows[start:before]), "_messages_offset": start,
+                            "_messages_truncated": start > 0,
+                            "_messages_boundary": project(rows[before:before + 1])[0], "tool_calls": []}})
                 elif path.startswith("/api/") or path.startswith("/v1/"):
                     route.fulfill(json={"sessions": [], "files": [], "models": [], "ok": True})
                 else:
@@ -84,6 +99,17 @@ def main():
                 })""", FINAL)
                 snapshot.update(width=width, height=height, errors=errors, gapRequests=len(gap_calls))
                 page.screenshot(path=str(out / f"{width}-settled.png"))
+                if projected:
+                    # Exercise the visible production control, not a mock paging helper.
+                    page.locator("#loadOlderIndicator").click()
+                    page.wait_for_function("() => _oldestIdx===130 && !_loadingOlder", timeout=10000)
+                    snapshot["paging"] = page.evaluate("""() => ({
+                        offset:_oldestIdx,loaded:S.messages.length,
+                        firstTimestamp:S.messages[0].timestamp,
+                        overflow:document.documentElement.scrollWidth-innerWidth
+                    })""")
+                    page.screenshot(path=str(out / f"{width}-paged.png"))
+                    assert snapshot["paging"] == {"offset": 130, "loaded": 60, "firstTimestamp": 131, "overflow": 0}
                 results.append(snapshot)
             except Exception as error:
                 results.append({"width": width, "error": str(error), "errors": errors})

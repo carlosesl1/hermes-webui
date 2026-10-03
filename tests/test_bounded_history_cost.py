@@ -45,7 +45,12 @@ def test_cursor_page_keeps_hidden_gap_for_absolute_indices():
             {"role": "assistant", "content": "new"}]
     session = _FakeSession(rows)
     page = _invoke(session, "session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1&msg_before=2&msg_boundary=1")
-    assert page["messages"] == rows[:2]
+    # Render-only boundary evidence is additive; message order/coordinates and
+    # all canonical fields remain exact, including the hidden raw tool row.
+    assert [{k: v for k, v in row.items() if k != '_paging_identity'}
+            for row in page["messages"]] == rows[:2]
+    assert page['messages'][0]['_paging_identity'].startswith('v1:')
+    assert all('_paging_identity' not in row for row in rows)
     assert page["_messages_offset"] + len(page["messages"]) == 2
 
 

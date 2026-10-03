@@ -5,6 +5,9 @@ Identity/shape metadata is preserved; only data-bearing string leaves are
 shortened. Thus these are text budgets, not a hostile-JSON structural size cap.
 """
 
+import hashlib
+import json
+
 SETTLEMENT_ROWS = 30
 FIELD_CHARS = 8192
 ROW_CHARS = 32768
@@ -23,6 +26,45 @@ TEXT_KEYS = frozenset({
     'arguments', 'input', 'output', 'result', 'snippet', 'summary',
     'detail', 'description', 'preview', 'command',
 })
+
+
+PAGING_IDENTITY_FIELDS = (
+    'id', 'role', 'content', 'timestamp', 'tool_call_id',
+    'tool_use_id', 'tool_calls', '_partial_tool_calls',
+)
+
+
+def _paging_identity(message):
+    """Fingerprint one window boundary BEFORE variable-budget projection.
+
+    Only the first row is needed by backward paging, never the history prefix.
+    Stream string leaves in chunks to avoid copying an entire giant tool/blob
+    into a second JSON/UTF-8 buffer. This is continuity evidence, not authority
+    for edits, regeneration, authentication, or occurrence deduplication.
+    """
+    digest = hashlib.sha256()
+
+    def visit(value):
+        if isinstance(value, str):
+            digest.update(b's' + str(len(value)).encode('ascii') + b':')
+            for start in range(0, len(value), 65536):
+                digest.update(value[start:start + 65536].encode('utf-8', errors='surrogatepass'))
+        elif isinstance(value, dict):
+            digest.update(b'{')
+            for key in sorted(value):
+                visit(key)
+                visit(value[key])
+            digest.update(b'}')
+        elif isinstance(value, (list, tuple)):
+            digest.update(b'[')
+            for item in value:
+                visit(item)
+            digest.update(b']')
+        else:
+            digest.update(json.dumps(value, ensure_ascii=True).encode('ascii') + b';')
+
+    visit({key: message.get(key) for key in PAGING_IDENTITY_FIELDS})
+    return 'v1:' + digest.hexdigest()
 
 
 def _fair_shares(demands, available):
@@ -110,6 +152,9 @@ def bounded_render_messages(messages, *, page_budget=None, settlement=False):
             return value
 
         preview = visit(message)
+        if index == 0 and message.get('role'):
+            # Page-size/fair-share clipping must not look like history edits.
+            preview['_paging_identity'] = _paging_identity(message)
         if clipped[0]:
             preview['_content_truncated'] = True
             preview['_preview_content_truncated'] = prose_clipped

@@ -30,6 +30,25 @@ progress update. A reader scrolled into the discarded range can lose that visual
 anchor on fallback; no forced bottom-scroll is added for an unpinned reader.
 Navigation-generation and stream ownership checks reject late A → B → A work.
 
+## Page continuity with large previews
+
+A page and its separately returned boundary can have different preview lengths,
+because shared character budgets reserve prose fairly across all rows. Comparing
+those previews literally incorrectly rejects unchanged history. The first row of
+each bounded projection now carries additive `_paging_identity` metadata computed
+from the original eight fields used by the existing continuity check. Both paging
+and settlement share that projector. The client compares valid versioned digests,
+falling back to the existing strict comparison for legacy payloads.
+
+Only the first selected row is fingerprinted, with string leaves processed in
+64-Ki-character chunks; neither the full history prefix nor a second giant JSON
+buffer is traversed/allocated. Time remains proportional to this one original
+boundary row. Identity, tool changes, and same-length edits beyond both previews
+are rejected. This digest is read-only continuity evidence, NOT edit authority,
+a regeneration revision, an authentication token, or occurrence deduplication.
+Canonical messages are not annotated or mutated. Old already-persisted previews
+without a fingerprint retain the legacy fail-closed behavior.
+
 ## Rendering caches
 
 - Long messages use the compact key only to locate a candidate. Full-source
@@ -64,7 +83,8 @@ Use the supported repository runner with isolated HOME/Hermes/WebUI state:
   tests/test_live_settlement_tail_pagination.py \
   tests/test_bounded_done_settlement.py \
   tests/test_long_chat_rendering_cache.py \
-  tests/test_long_chat_resources_journal.py
+  tests/test_long_chat_resources_journal.py \
+  tests/test_projected_boundary_pagination.py
 npm run lint:runtime
 ```
 
@@ -72,12 +92,15 @@ With an existing Playwright/Chromium installation:
 
 ```sh
 python tests/browser_long_chat_settlement.py
+LONG_CHAT_PROJECTED=1 python tests/browser_long_chat_settlement.py
 python tests/browser_long_chat_rendering.py
 python tests/browser_conversation_lifecycle.py
 ```
 
 The first browser script exercises the actual EventSource listener, production
-renderer, and CSS with offline HTTP fixtures at 1440×900 and 522×1232. The rendering
+renderer, and CSS with offline HTTP fixtures at 1440×900 and 522×1232.
+`LONG_CHAT_PROJECTED=1` additionally uses real backend previews and clicks the
+visible older-history control after a failed gap read. The rendering
 script checks 400 loaded rows, bounded DOM, cache collisions, focus, and reader
 anchors at desktop and narrow widths. Neither makes a provider call. The lifecycle
 gate separately runs the real isolated WebUI server with a deterministic Gateway.
