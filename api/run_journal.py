@@ -150,25 +150,50 @@ def _discard_cached_summary(path: Path) -> None:
         _SUMMARY_CACHE.pop(str(path), None)
 
 
-def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
+def _read_jsonl(
+    path: Path, *, after_seq: int | None = None, max_seq: int | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Retain only the replay window, not a decoded copy of the entire journal.
+
+    Read through one descriptor up to its opening size: a concurrent append
+    belongs to the next observation, and an atomic replacement cannot mix two
+    files. Still scan every row for malformed diagnostics and legacy imports
+    with out-of-order explicit sequences. Memory is proportional to the largest
+    row plus returned events/diagnostics; no cache or canonical writes are used.
+    """
     events: list[dict] = []
     malformed: list[dict] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        fh = path.open("rb")
     except FileNotFoundError:
         return events, malformed
-    for line_no, raw in enumerate(lines, start=1):
-        if not raw.strip():
-            continue
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            malformed.append({"line": line_no, "raw": raw})
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-        else:
-            malformed.append({"line": line_no, "raw": raw})
+    with fh:
+        remaining = os.fstat(fh.fileno()).st_size
+        line_no = 0
+        while remaining > 0:
+            line = fh.readline(remaining)
+            if not line:
+                break
+            remaining -= len(line)
+            # Preserve the legacy splitlines diagnostic/line-number semantics
+            # (including CR-only imports) without materialising the whole file.
+            for raw in line.decode("utf-8").splitlines():
+                line_no += 1
+                if not raw.strip():
+                    continue
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    malformed.append({"line": line_no, "raw": raw})
+                    continue
+                if not isinstance(parsed, dict):
+                    malformed.append({"line": line_no, "raw": raw})
+                    continue
+                if after_seq is not None and int(parsed.get("seq") or 0) <= int(after_seq):
+                    continue
+                if max_seq is not None and int(parsed.get("seq") or 0) > int(max_seq):
+                    continue
+                events.append(parsed)
     return events, malformed
 
 
@@ -523,11 +548,7 @@ def read_run_events(
     session_dir: Path | None = None,
 ) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
-    events, malformed = _read_jsonl(path)
-    if after_seq is not None:
-        events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
-    if max_seq is not None:
-        events = [event for event in events if int(event.get("seq") or 0) <= int(max_seq)]
+    events, malformed = _read_jsonl(path, after_seq=after_seq, max_seq=max_seq)
     return {
         "session_id": str(session_id),
         "run_id": str(run_id),
