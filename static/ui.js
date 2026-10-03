@@ -1528,7 +1528,17 @@ function _scheduleMessageVirtualizedRender(force){
 // pipeline entirely.  ~95% of messages are identical between renders.
 const _renderCache = new Map();
 const _renderCacheMax = 300;
-function _clearRenderCache(){ _renderCache.clear(); }
+// Bound string payloads as well as entry count. This is conservative UTF-16
+// accounting, not a total browser-heap limit (DOM/Map overhead is separate).
+const _renderCacheMaxBytes = 8 * 1024 * 1024;
+let _renderCacheBytes = 0;
+function _clearRenderCache(){ _renderCache.clear(); _renderCacheBytes=0; }
+function _evictCachedRender(key){
+  const entry=_renderCache.get(key);
+  if(entry===undefined) return;
+  _renderCacheBytes-=entry.bytes;
+  _renderCache.delete(key);
+}
 function _renderCacheKey(text, isUser){
   // Fold render_user_markdown state into user-message keys so toggling the
   // setting invalidates cached plain-text renders (#3870).
@@ -1552,12 +1562,16 @@ function _getCachedRender(text, isUser){
   const rendered = isUser
     ? (window._renderUserMarkdown ? renderMd(text) : _renderUserFencedBlocks(text))
     : renderMd(_stripXmlToolCallsDisplay(String(text)));
-  _renderCache.delete(key);
-  _renderCache.set(key, {text,html:rendered});
-  // Evict only the coldest entry, rather than reparsing the whole visible
-  // window after the cache fills. Keep the existing capacity as a hard bound.
-  while(_renderCache.size > _renderCacheMax){
-    _renderCache.delete(_renderCache.keys().next().value);
+  const bytes=2*(key.length+text.length+rendered.length);
+  // A giant answer remains fully rendered, but must not displace the entire
+  // working set or be retained indefinitely just because it is one entry.
+  if(bytes>_renderCacheMaxBytes) return rendered;
+  _evictCachedRender(key);
+  _renderCache.set(key, {text,html:rendered,bytes});
+  _renderCacheBytes+=bytes;
+  // Evict only the coldest entries, not the entire visible working set.
+  while(_renderCache.size>_renderCacheMax || _renderCacheBytes>_renderCacheMaxBytes){
+    _evictCachedRender(_renderCache.keys().next().value);
   }
   return rendered;
 }

@@ -85,6 +85,36 @@ console.log(JSON.stringify({plain,markdown,before,after:calls,empty}));
                       "before": 3, "after": 4, "empty": 0}
 
 
+def test_render_cache_bounds_string_storage_without_changing_large_answers():
+    result = run_js(CACHE_ENV + cache_source() + """
+for(let i=0;i<100;i++) _getCachedRender('large '+i+':'+('x'.repeat(100000)),false);
+const stored=[..._renderCache].reduce((n,[key,value])=>n+2*(key.length+value.text.length+value.html.length),0);
+const hot='hot reply';_getCachedRender(hot,false);
+const huge='HUGE: '+'z'.repeat(5000000);
+const output=_getCachedRender(huge,false);
+const before=calls;_getCachedRender(hot,false);
+console.log(JSON.stringify({stored,hugeComplete:output==='<md>'+huge+'</md>',
+  hugeRetained:[..._renderCache.values()].some(v=>v.text===huge),hotRetained:calls===before}));
+""")
+    assert result["stored"] <= 8 * 1024 * 1024, result
+    assert result["hugeComplete"] and not result["hugeRetained"], result
+    assert result["hotRetained"], result
+
+
+def test_cache_byte_accounting_survives_collision_eviction_and_clear():
+    result = run_js(CACHE_ENV + cache_source() + """
+const a='h'.repeat(300)+'A'+'f'.repeat(300), b=a.replace('A','B');
+for(let i=0;i<5;i++){_getCachedRender(a,false);_getCachedRender(b,false);}
+const expected=[..._renderCache].reduce((n,[k,v])=>n+2*(k.length+v.text.length+v.html.length),0);
+const tracked=typeof _renderCacheBytes==='number'?_renderCacheBytes:null;
+_clearRenderCache();
+console.log(JSON.stringify({expected,tracked,empty:_renderCache.size,
+  cleared:typeof _renderCacheBytes==='number'?_renderCacheBytes:null}));
+""")
+    assert result["tracked"] == result["expected"], result
+    assert result["empty"] == result["cleared"] == 0, result
+
+
 def test_stable_virtual_height_sync_does_not_visit_loaded_history():
     source = (ROOT / "static/ui.js").read_text(encoding="utf-8")
     helpers = source[source.index("function _messageVirtualHeightEntryMatches("):
