@@ -1,3 +1,15 @@
+// Continuity at a raw cursor, NOT identity of a message occurrence. Never use
+// this fingerprint to deduplicate equal messages at different coordinates.
+function _pagingBoundaryMatches(boundary, first){
+  if(!boundary||!first||!boundary.role||!first.role) return false;
+  const valid=value=>/^v1:[a-f0-9]{64}$/.test(value||'');
+  if(valid(boundary._paging_identity)&&valid(first._paging_identity))
+    return boundary._paging_identity===first._paging_identity;
+  const fields=['id','role','content','timestamp','tool_call_id',
+    'tool_use_id','tool_calls','_partial_tool_calls'];
+  return fields.every(key=>JSON.stringify(boundary[key]??null)===JSON.stringify(first[key]??null));
+}
+
 // Done carries a raw-coordinate preview, not replacement/full-history authority.
 function _restoreSettlementPreview(old, row){
   if(typeof old==='string' && typeof row==='string' && old.startsWith(row)) return old;
@@ -74,7 +86,9 @@ function _completeSettlementWindow(incoming, sid){
   const stillOwned=()=>S.session?.session_id===sid && S.activeStreamId===ownerStream
     && (generation===null||_loadSessionGeneration===generation);
   let before=Number(incoming._messages_offset)||0;
-  const end=(typeof _oldestIdx==='number'?_oldestIdx:0)+(S.messages||[]).length;
+  const oldOffset=typeof _oldestIdx==='number'?_oldestIdx:0;
+  const previous=S.messages||[];
+  const end=oldOffset+previous.length;
   // Return no promise unless hydration really needs I/O. Even awaiting an
   // already-resolved promise would interrupt legacy done-event settlement.
   if(before<=end) return;
@@ -92,7 +106,9 @@ function _completeSettlementWindow(incoming, sid){
       const suffix=[];
       const cards=[];
       let pages=0;
-      while(before>end){
+      // An adjacent page proves the right join only. Fetch overlap as well
+      // before retaining a local prefix (within the same page/time budget).
+      while(before>=end&&before>oldOffset){
         if(!stillOwned()||controller.signal.aborted) return;
         if(pages++>=_SETTLEMENT_GAP_MAX_PAGES) throw new Error('Settlement gap exceeds page budget');
         const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=30&msg_boundary=1&msg_before=${before}`,
@@ -101,6 +117,10 @@ function _completeSettlementWindow(incoming, sid){
         const page=data?.session;
         const start=Number(page?._messages_offset);
         if((page?.session_id&&page.session_id!==sid)||!Number.isInteger(start)||start<0||start>=before||!Array.isArray(page?.messages)||start+page.messages.length!==before) throw new Error('Incomplete settlement page');
+        if(!_pagingBoundaryMatches(page._messages_boundary,suffix[0]||incoming.messages?.[0]))
+          throw new Error('Settlement page boundary changed');
+        if(start>oldOffset&&start<end&&!_pagingBoundaryMatches(page.messages[0],previous[start-oldOffset]))
+          throw new Error('Settlement prefix boundary changed');
         suffix.unshift(...page.messages);
         cards.unshift(...(page.tool_calls||[]).map(tc=>({...tc,assistant_msg_idx:tc.assistant_msg_idx+start})));
         before=start;
@@ -112,6 +132,8 @@ function _completeSettlementWindow(incoming, sid){
       // No late I/O may mutate the adopted tail or a subsequent pane. Partial
       // hydration is private until it bridges the entire gap successfully.
       if(result&&stillOwned()&&!controller.signal.aborted){
+        if(S.messages!==previous||(typeof _oldestIdx==='number'?_oldestIdx:0)!==oldOffset
+          ||previous.length!==end-oldOffset) throw new Error('Settlement loaded range changed');
         incoming.messages=result.suffix.concat(incoming.messages);
         incoming.tool_calls=result.cards.concat(incoming.tool_calls||[]);
         incoming._messages_offset=result.before;
@@ -3840,15 +3862,44 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(idx>lastProjectedToolIndex&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')) finalSegmentLiveProseRows.add(row);
     });
     const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
+    // A bounded done preview can be MUCH shorter than the final token row.
+    // Only the owning stream's last post-tool accumulator may be suppressed
+    // by that reverse-prefix evidence; text equality is not occurrence identity.
+    const settlementStream=(typeof streamId!=='undefined'&&streamId)||base.identity?.stream_id
+      ||(typeof S!=='undefined'&&S.activeStreamId);
+    const clippedFinal=lastAsst._content_truncated===true&&lastAsst._preview_content_truncated!==false
+      &&typeof lastAsst.content==='string'&&messageFinalAnswer===finalAnswer
+      &&(lastAsst._preview_content_truncated===true
+        ||Number(lastAsst._content_original_chars)>Array.from(lastAsst.content).length);
+    let clippedFinalRow=null;
+    if(clippedFinal&&settlementStream){
+      const localPrefix=`live-prose:${settlementStream}:`;
+      for(const row of projectedRows){
+        if(!finalSegmentLiveProseRows.has(row)) continue;
+        const owners=[row.stream_id,row.identity?.stream_id,base.identity?.stream_id,
+          lastAsst._anchor_stream_id,lastAsst.stream_id].filter(Boolean);
+        if(owners.some(owner=>owner!==settlementStream)) continue;
+        const localId=String(row.local_id||'');
+        if(localId.startsWith(localPrefix)&&/^\d+$/.test(localId.slice(localPrefix.length))) clippedFinalRow=row;
+      }
+    }
     const pushRow=(row)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
+      // A clipped preview cannot prove that a different token occurrence is
+      // final, even when its text happens to be a near/exact match.
+      const preserveClippedNarration=clippedFinal&&row!==clippedFinalRow
+        &&row.role==='prose'&&row.kind==='process_prose'&&row.source_event_type==='token';
+      if(row===clippedFinalRow){
+        const liveText=_anchorSceneCleanText(row.text),preview=_anchorSceneCleanText(messageFinalAnswer);
+        if(preview&&liveText.length>preview.length&&liveText.startsWith(preview)) return;
+      }
       row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
       if(!row||typeof row!=='object') return;
       const textKey=_anchorSceneTextKey(row.text);
-      if(rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)) return;
+      if(!preserveClippedNarration&&rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)) return;
       const isTextual=row.role==='prose'||row.role==='thinking';
-      if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
+      if(isTextual&&!preserveClippedNarration&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
       if(isTextual&&_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
       const key=_anchorSceneExistingRowKey(row);
       if(key&&seen.has(key)) return;

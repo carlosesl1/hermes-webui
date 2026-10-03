@@ -128,7 +128,7 @@ assert.deepEqual(fallback.messages,gap.messages);assert.equal(fallback._messages
 assert.equal(fallback._settlement_gap,true);assert.equal(fallback.has_more,true);
 assert.deepEqual(fallback.tool_calls,[]);assert.equal(old.length,100);
 async function api(url){calls++;const before=Number(new URL(url,'http://local').searchParams.get('msg_before'));
- const start=Math.max(0,before-30);return {session:{_messages_offset:start,
+ const start=Math.max(0,before-30);return {session:{_messages_offset:start,_messages_boundary:{role:'assistant',content:'row '+before},
  messages:Array.from({length:before-start},(_,i)=>({role:'assistant',content:'row '+(start+i)}))}};}
 // Legacy, rotated, contiguous and overlapping envelopes must not yield.
 assert.equal(_completeSettlementWindow({session_id:'s',messages:[]},'s'),undefined);
@@ -136,9 +136,10 @@ assert.equal(_completeSettlementWindow(incoming,'s'),undefined);
 assert.equal(_completeSettlementWindow({...incoming,_messages_offset:100},'s'),undefined);
 assert.equal(_completeSettlementWindow({...incoming,session_id:'rotated'},'s'),undefined);
 assert.equal(calls,0);
-(async()=>{await _completeSettlementWindow(gap,'s');assert.equal(calls,2);
- assert.equal(gap._messages_offset,100);assert.equal(_mergeSettlementWindow(old,gap).messages.length,190);
- assert.equal(gap.messages.length,90);
+(async()=>{gap.messages=Array.from({length:30},(_,i)=>({role:'assistant',content:'row '+(160+i)}));
+ await _completeSettlementWindow(gap,'s');assert.equal(calls,3);
+ assert.equal(gap._messages_offset,70);assert.equal(_mergeSettlementWindow(old,gap).messages.length,190);
+ assert.equal(gap.messages.length,120);
  const failed={...incoming,_messages_offset:160};
  api=async()=>({session:{_messages_offset:160,messages:[]}});
  await assert.rejects(_completeSettlementWindow(failed,'s'),/Incomplete/);

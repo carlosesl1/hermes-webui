@@ -125,6 +125,7 @@ const api = async url => {
     tool_calls:[{id:'old-tool',assistant_msg_idx:1}]}};
 };
 eval(extract('sessions', '_syncToolCallsForLoadedMessages'));
+eval(extract('messages', '_pagingBoundaryMatches'));
 eval(extract('sessions', '_loadOlderMessages'));
 (async () => {
   await _loadOlderMessages();

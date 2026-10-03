@@ -17,6 +17,9 @@ def test_cursor_first_older_load(scenario):
     source = path.read_text()
     start = source.index('async function _loadOlderMessages()')
     function = source[start:source.index('\n}', start)+2]
+    messages = (path.parent / 'messages.js').read_text()
+    helper_start = messages.index('function _pagingBoundaryMatches(')
+    function = messages[helper_start:messages.index('\n}', helper_start)+2] + '\n' + function
     script = r'''
 const assert = require('node:assert/strict');
 const scenario = SCENARIO;

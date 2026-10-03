@@ -89,7 +89,7 @@ async function api(url,opts){
   if(mode==='invalid')return {session:{session_id:'a',_messages_offset:before,messages:[]}};
   if(['delayed','aba','replaced-source','hung','hung-real','late','aba-timeout'].includes(mode)&&calls.length===1)
     await new Promise(resolve=>release=resolve);
-  return {session:{session_id:mode==='wrong-session'?'other':'a',_messages_offset:start,messages:rows.slice(start,before)}};
+  return {session:{session_id:mode==='wrong-session'?'other':'a',_messages_offset:start,messages:rows.slice(start,before),_messages_boundary:rows[before]}};
 }
 """.replace("MODE", json.dumps(mode))
     probe = r"""
@@ -172,7 +172,7 @@ def test_received_final_answer_survives_gap_hydration_failure(mode, pages):
         assert 1500 <= observed["elapsedMs"] < 3000
 
 
-@pytest.mark.parametrize("mode, pages", [("contiguous", 0), ("success", 2), ("delayed", 2)])
+@pytest.mark.parametrize("mode, pages", [("contiguous", 0), ("success", 3), ("delayed", 3)])
 def test_successful_gap_settlement_keeps_history_and_final_separate(mode, pages):
     observed = _observe(mode)
     assert len(observed["calls"]) == pages

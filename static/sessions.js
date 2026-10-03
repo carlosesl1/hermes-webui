@@ -3737,18 +3737,8 @@ async function _loadOlderMessages() {
     if (Object.prototype.hasOwnProperty.call(responseSession, '_messages_boundary')) {
       const boundary = responseSession._messages_boundary;
       const first = S.messages[0];
-      const identityFields = ['id', 'role', 'content', 'timestamp', 'tool_call_id',
-        'tool_use_id', 'tool_calls', '_partial_tool_calls'];
-      // New projections carry a canonical boundary fingerprint. Their text
-      // previews can differ with page budgets (or restored full prose), so
-      // literal preview equality is only valid for legacy payloads.
-      const hasIdentity = /^v1:[a-f0-9]{64}$/.test(first?._paging_identity || '')
-        && /^v1:[a-f0-9]{64}$/.test(boundary?._paging_identity || '');
-      const changed = hasIdentity
-        ? boundary._paging_identity !== first._paging_identity
-        : identityFields.some(key =>
-          JSON.stringify(boundary?.[key] ?? null) !== JSON.stringify(first?.[key] ?? null));
-      if (!boundary || !first || changed) {
+      // Share the canonical-fingerprint/strict-legacy rule with done hydration.
+      if (!_pagingBoundaryMatches(boundary, first)) {
         console.warn('History changed while paging; reload the conversation before loading older messages.');
         if (typeof showToast === 'function') showToast(t('history_paging_changed'));
         return;
