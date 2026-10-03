@@ -1964,6 +1964,19 @@ def _materialize_active_turn_user(identity, msg_text, source):
     return message
 
 
+def _carry_resolved_checkpoint_uid(target, source):
+    """Carry only the durable UID after the caller proves current-turn ownership.
+
+    Retain WebUI time/content and never replay physical-row write authority or
+    replace an existing (possibly conflicting) occurrence identity.
+    """
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    uid = source.get('message_uid')
+    if target.get('message_uid') in (None, '') and isinstance(uid, str) and uid:
+        target['message_uid'] = uid
+
+
 def _settle_current_turn_boundary(previous_context, result_messages, identity, msg_text, source):
     """Insert the pending turn before assistant/tool output when it is absent."""
     result_messages = list(result_messages or [])
@@ -1985,6 +1998,7 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
                 and existing_checkpoint.get('id') is not None
             ):
                 retained_checkpoint['id'] = existing_checkpoint['id']
+            _carry_resolved_checkpoint_uid(retained_checkpoint, existing_checkpoint)
             result_messages[_checkpoint_idx] = retained_checkpoint
         else:
             _mark_active_turn_checkpoint(existing_checkpoint, identity)
@@ -7164,6 +7178,17 @@ def _merge_display_messages_after_agent_result(
         previous_context,
         _active_turn_identity,
     )
+    # Eager/deferred display checkpoints predate the core's UID. Transfer it
+    # only from the authority-resolved result row to its token-owned display
+    # checkpoint, not from any same-text historical user row.
+    returned_checkpoint_idx = _find_active_turn_checkpoint_index(
+        result_messages, previous_context, _active_turn_identity, msg_text,
+    )
+    if returned_checkpoint_idx is not None:
+        for checkpoint in previous_display:
+            if _active_turn_token_matches(checkpoint, _active_turn_identity):
+                _carry_resolved_checkpoint_uid(checkpoint, result_messages[returned_checkpoint_idx])
+                break
     # Same marker filter for the model-history inputs: the synthetic verify-loop
     # answer/nudge live in the agent's returned messages and prior context, and
     # would otherwise slip into the merged transcript as a real delta. (#5334)

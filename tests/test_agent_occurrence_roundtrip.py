@@ -106,6 +106,70 @@ def test_agent_return_merge_and_save_reload_keep_identity(tmp_path, monkeypatch)
         'question', 'answer', 'new-question', 'new-answer']
 
 
+@pytest.mark.parametrize('eager', [False, True])
+@pytest.mark.parametrize('returned_uid', ['core-user', '', None, 42])
+def test_owned_checkpoint_retains_returned_uid_through_next_turn(tmp_path, monkeypatch, eager, returned_uid):
+    monkeypatch.setattr(models, 'SESSION_DIR', tmp_path)
+    previous = [
+        {'role': 'user', 'content': 'Continue', 'timestamp': 100.0, 'message_uid': 'old-user'},
+        {'role': 'assistant', 'content': 'Earlier answer', 'timestamp': 110.0, 'message_uid': 'old-answer'},
+    ]
+    checkpoint = {'role': 'user', 'content': 'Continue', 'timestamp': 200.0,
+                  '_active_turn_token': 'current-token'}
+    identity = {'session_id': 'owned', 'token': 'current-token', 'text': 'Continue',
+                'timestamp': 200.0, 'source': 'webui', 'checkpoint': copy.deepcopy(checkpoint),
+                'current_turn_user_idx': 2, 'turn_id': 'current-turn',
+                'agent_turn_boundary_resolved': True}
+    returned = copy.deepcopy(previous) + [
+        {'role': 'user', 'content': 'Continue', 'timestamp': 201.0, 'message_uid': returned_uid,
+         '_db_persisted': True, '_row_id': 99},
+        {'role': 'assistant', 'content': 'New answer', 'timestamp': 210.0, 'message_uid': 'new-answer'},
+    ]
+    display = copy.deepcopy(previous) + ([copy.deepcopy(checkpoint)] if eager else [])
+    session = models.Session(session_id='owned', messages=display)
+    streaming._settle_result_messages(session, display, copy.deepcopy(previous), returned,
+                                      'Continue', 'webui', identity)
+    expected_uid = returned_uid if isinstance(returned_uid, str) and returned_uid else None
+    for rows in (session.messages, session.context_messages):
+        assert len(rows) == 4
+        assert rows[0]['message_uid'] == 'old-user'
+        assert rows[2].get('message_uid') == expected_uid
+        assert rows[2]['timestamp'] == 200.0
+        assert '_db_persisted' not in rows[2] and '_row_id' not in rows[2]
+    session.save(skip_index=True)
+    loaded = models.Session.load(session.session_id)
+    replay = streaming._sanitize_messages_for_agent(loaded.context_messages)
+    assert replay[2].get('message_uid') == expected_uid
+    assert loaded.messages[2].get('message_uid') == expected_uid
+    assert len(loaded.messages) == 4
+
+
+@pytest.mark.parametrize('resolved', [False, True])
+def test_eager_display_uid_requires_resolved_current_turn(resolved):
+    checkpoint = {'role': 'user', 'content': 'Continue', '_active_turn_token': 'current'}
+    identity = {'token': 'current', 'text': 'Continue', 'checkpoint': checkpoint,
+                'current_turn_user_idx': 0, 'turn_id': 'turn', 'agent_turn_boundary_resolved': resolved}
+    returned = [{'role': 'user', 'content': 'Continue', 'message_uid': 'returned'}]
+    display = streaming._merge_display_messages_after_agent_result(
+        [copy.deepcopy(checkpoint)], [], returned, 'Continue',
+        verification_nudge_provenance={'active_turn_identity': identity})
+    assert display[0].get('message_uid') == ('returned' if resolved else None)
+
+
+def test_checkpoint_uid_never_overwrites_conflicting_identity():
+    checkpoint = {'role': 'user', 'content': 'Continue', 'message_uid': 'retained',
+                  '_active_turn_token': 'current'}
+    identity = {'token': 'current', 'text': 'Continue', 'checkpoint': checkpoint,
+                'current_turn_user_idx': 0, 'turn_id': 'turn', 'agent_turn_boundary_resolved': True}
+    returned = [{'role': 'user', 'content': 'Continue', 'message_uid': 'conflict'}]
+    context = streaming._settle_current_turn_boundary([], returned, identity, 'Continue', 'webui')
+    assert context[0]['message_uid'] == 'retained'
+    display = streaming._merge_display_messages_after_agent_result(
+        [copy.deepcopy(checkpoint)], [], returned, 'Continue',
+        verification_nudge_provenance={'active_turn_identity': identity})
+    assert display[0]['message_uid'] == 'retained'
+
+
 @pytest.mark.parametrize('role', ['user', 'assistant'])
 def test_matching_legacy_sidecar_adopts_durable_uid(role):
     local = {'role': role, 'content': 'A', 'timestamp': 100.0}
