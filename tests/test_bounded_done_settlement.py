@@ -123,7 +123,10 @@ assert.equal(_mergeSettlementWindow(blocks,blockPreview).messages[0].content[0].
 assert.equal(_mergeSettlementWindow(blocks,blockPreview).messages[0].reasoning,'full reasoning');
 let S={session:{session_id:'s'},messages:old,activeStreamId:'run'},_oldestIdx=0,calls=0,_loadSessionGeneration=1;
 const gap={...incoming,_messages_offset:160,message_count:190};
-assert.equal(_mergeSettlementWindow(old,gap).messages,old);
+const fallback=_mergeSettlementWindow(old,gap,0,true,[{id:'old',assistant_msg_idx:1}]);
+assert.deepEqual(fallback.messages,gap.messages);assert.equal(fallback._messages_offset,160);
+assert.equal(fallback._settlement_gap,true);assert.equal(fallback.has_more,true);
+assert.deepEqual(fallback.tool_calls,[]);assert.equal(old.length,100);
 async function api(url){calls++;const before=Number(new URL(url,'http://local').searchParams.get('msg_before'));
  const start=Math.max(0,before-30);return {session:{_messages_offset:start,
  messages:Array.from({length:before-start},(_,i)=>({role:'assistant',content:'row '+(start+i)}))}};}

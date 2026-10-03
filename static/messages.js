@@ -40,10 +40,11 @@ function _mergeSettlementWindow(previous, incoming, oldOffset=0, sameSession=tru
     offset=oldOffset;
   }
   if(sameSession && oldOffset+previous.length<start){
-    next.messages=previous;next._messages_offset=oldOffset;
-    next._messages_truncated=oldOffset>0;next.has_more=oldOffset>0;next._settlement_gap=true;
-    next.tool_calls=previousTools;
-    return next;
+    // Hydration is best-effort, not authority over the received final answer.
+    // Adopt ONE coherent tail window on failure/budget exhaustion. The existing
+    // history disclosure/pagination can recover its prefix; never concatenate
+    // disjoint ranges and thereby invent raw message/tool coordinates.
+    next._settlement_gap=true;
   }
   // A replayed preview cannot delete newer rows already loaded by this pane.
   const incomingEnd=start+rows.length;
@@ -53,14 +54,19 @@ function _mergeSettlementWindow(previous, incoming, oldOffset=0, sameSession=tru
   }
   next.messages=messages;next._messages_offset=offset;
   next._messages_truncated=offset>0;next.has_more=offset>0;
-  const retainedTools=sameSession?previousTools.filter(tc=>Number.isInteger(tc.assistant_msg_idx)&&tc.assistant_msg_idx+oldOffset<start)
+  const retainedTools=sameSession?previousTools.filter(tc=>Number.isInteger(tc.assistant_msg_idx)
+    && tc.assistant_msg_idx+oldOffset>=offset && tc.assistant_msg_idx+oldOffset<start)
     .map(tc=>({...tc,assistant_msg_idx:tc.assistant_msg_idx+oldOffset-offset})):[];
   next.tool_calls=retainedTools.concat((incoming.tool_calls||[]).map(tc=>({...tc,assistant_msg_idx:tc.assistant_msg_idx-offset})));
   return next;
 }
 
 // A long tool-only turn may leave a gap between the loaded range and done tail.
-// Fill only that gap with bounded cursor pages, never reload the whole history.
+// Preserve the reader's loaded range when cheap, but never hold the final reply
+// behind an unbounded page walk or a stalled request. One deadline covers ALL
+// pages; the caller falls back to the authoritative tail on any failure.
+const _SETTLEMENT_GAP_MAX_PAGES=3;
+const _SETTLEMENT_GAP_BUDGET_MS=1500;
 function _completeSettlementWindow(incoming, sid){
   if(incoming?._settlement_window!=='tail_v1'||S.session?.session_id!==sid||incoming.session_id!==sid) return;
   const generation=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
@@ -73,19 +79,47 @@ function _completeSettlementWindow(incoming, sid){
   // already-resolved promise would interrupt legacy done-event settlement.
   if(before<=end) return;
   return (async()=>{
-    const suffix=[];
-    const cards=[];
-    while(before>end){
-      const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=30&msg_boundary=1&msg_before=${before}`);
-      if(!stillOwned()) return;
-      const page=data?.session;
-      const start=Number(page?._messages_offset);
-      if((page?.session_id&&page.session_id!==sid)||!Number.isInteger(start)||start<0||start>=before||start+(page.messages||[]).length!==before) throw new Error('Incomplete settlement page');
-      suffix.unshift(...page.messages);
-      cards.unshift(...(page.tool_calls||[]).map(tc=>({...tc,assistant_msg_idx:tc.assistant_msg_idx+start})));
-      before=start;
+    if(before-end>30*_SETTLEMENT_GAP_MAX_PAGES) throw new Error('Settlement gap exceeds page budget');
+    const controller=new AbortController();
+    let timer;
+    const deadline=new Promise((_,reject)=>{
+      timer=setTimeout(()=>{
+        controller.abort();
+        reject(new Error('Settlement gap deadline exceeded'));
+      },_SETTLEMENT_GAP_BUDGET_MS);
+    });
+    const hydrate=async()=>{
+      const suffix=[];
+      const cards=[];
+      let pages=0;
+      while(before>end){
+        if(!stillOwned()||controller.signal.aborted) return;
+        if(pages++>=_SETTLEMENT_GAP_MAX_PAGES) throw new Error('Settlement gap exceeds page budget');
+        const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=30&msg_boundary=1&msg_before=${before}`,
+          {signal:controller.signal,timeoutMs:_SETTLEMENT_GAP_BUDGET_MS,retries:0,timeoutToast:false});
+        if(!stillOwned()||controller.signal.aborted) return;
+        const page=data?.session;
+        const start=Number(page?._messages_offset);
+        if((page?.session_id&&page.session_id!==sid)||!Number.isInteger(start)||start<0||start>=before||!Array.isArray(page?.messages)||start+page.messages.length!==before) throw new Error('Incomplete settlement page');
+        suffix.unshift(...page.messages);
+        cards.unshift(...(page.tool_calls||[]).map(tc=>({...tc,assistant_msg_idx:tc.assistant_msg_idx+start})));
+        before=start;
+      }
+      return {suffix,cards,before};
+    };
+    try{
+      const result=await Promise.race([hydrate(),deadline]);
+      // No late I/O may mutate the adopted tail or a subsequent pane. Partial
+      // hydration is private until it bridges the entire gap successfully.
+      if(result&&stillOwned()&&!controller.signal.aborted){
+        incoming.messages=result.suffix.concat(incoming.messages);
+        incoming.tool_calls=result.cards.concat(incoming.tool_calls||[]);
+        incoming._messages_offset=result.before;
+      }
+    }finally{
+      clearTimeout(timer);
+      controller.abort();
     }
-    if(suffix.length){incoming.messages=suffix.concat(incoming.messages);incoming.tool_calls=cards.concat(incoming.tool_calls||[]);incoming._messages_offset=before;}
   })();
 }
 
@@ -6223,7 +6257,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const hydration=_completeSettlementWindow(_doneData.session,activeSid);
           if(hydration) await hydration;
         }
-        catch(error){console.warn('Settlement gap needs explicit transcript reload',error);}
+        catch(error){console.warn('Settlement gap: showing authoritative tail; older history remains available',error);}
         if((_doneLoadGeneration!==null&&_loadSessionGeneration!==_doneLoadGeneration)
             || _bailOutOfTerminalEventsFromStaleStream(source)){
           _scheduleAnchorRegistryCleanup();_closeSource(source);return;
@@ -6302,6 +6336,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           d.session=_mergeSettlementWindow(S.messages||[],d.session,typeof _oldestIdx==='number'?_oldestIdx:0,S.session?.session_id===d.session.session_id,S.toolCalls||[]);
+          // Invalidate any older-page request anchored in the discarded prefix.
+          if(d.session._settlement_gap&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.session={...S.session,...d.session};S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           if(d.session._settlement_window==='tail_v1') delete S.session.regeneration_revision;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
@@ -6336,7 +6372,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
-          lastAsst=d.session._settlement_gap?null:[...S.messages].reverse().find(m=>m.role==='assistant');
+          lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
           // Persist reasoning trace for Worklog Thinking Cards; normal transcript
           // rendering keeps provider reasoning out of the final answer.
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
@@ -6401,7 +6437,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               }
             }
           }
-          if(!d.session._settlement_gap) _attachProjectedAnchorSceneToLastAssistant(S.messages);
+          _attachProjectedAnchorSceneToLastAssistant(S.messages);
           const hasMessageToolMetadata=S.messages.some(m=>{
             if(!m||m.role!=='assistant') return false;
             const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -6414,7 +6450,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
           } else {
             if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
-            S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
+            S.toolCalls=(hasMessageToolMetadata||d.session._settlement_gap)?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
           if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
           if(uploaded.length){
