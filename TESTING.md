@@ -143,6 +143,17 @@ matrix expands to additional behavior rows. The maintainer's private QA harness
 remains broader; later public slices will add session switching, reconnect/replay,
 cancellation, compression, and recovery.
 
+### Long-chat regression gates
+
+See [long-chat reliability and resource budgets](docs/long-chat-reliability.md)
+for bounded settlement fallback, render-cache limits, replay memory, and scope.
+`tests/browser_long_chat_settlement.py` verifies that a failed history request
+cannot hide an already received final answer at desktop and narrow widths.
+`tests/browser_long_chat_rendering.py` covers cache collisions and virtualized
+reader/focus preservation. Both use offline HTTP fixtures with production assets;
+run `tests/browser_conversation_lifecycle.py` separately for the real isolated
+server/Gateway lifecycle. These are not real-provider E2E claims.
+
 ### Streaming reader intent
 
 While a response is still streaming, scroll upward with a trackpad or wheel to
