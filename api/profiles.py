@@ -1796,12 +1796,22 @@ def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
     """Return the max st_mtime_ns across config.yaml, skill dirs, and SKILL.md files."""
     max_ns = 0
     try:
-        if config_path.exists():
-            max_ns = max(max_ns, config_path.stat().st_mtime_ns)
+        max_ns = max(max_ns, config_path.stat().st_mtime_ns)
     except OSError:
         pass
     if not skills_dir.is_dir():
         return max_ns
+
+    def _unreadable_directory(error):
+        # os.walk skips directories it cannot scan. Their mtimes still matter:
+        # the old parent-side stat observed them even when descent failed.
+        nonlocal max_ns
+        if error.filename is not None:
+            try:
+                max_ns = max(max_ns, Path(error.filename).stat().st_mtime_ns)
+            except OSError:
+                pass
+
     try:
         from agent.skill_utils import EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS
     except Exception:
@@ -1812,7 +1822,9 @@ def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
         # followlinks=True mirrors agent.skill_utils.iter_skill_index_files (the compute
         # path), so a symlinked skill directory is descended into and edits to its target
         # SKILL.md change the probe value — otherwise such edits would stay stale up to the TTL.
-        for root, dirnames, filenames in os.walk(skills_dir, followlinks=True):
+        for root, dirnames, filenames in os.walk(
+            skills_dir, followlinks=True, onerror=_unreadable_directory,
+        ):
             root_path = Path(root)
             # Prune the SAME trees iter_skill_index_files prunes (.git/.venv/
             # node_modules/site-packages + skill support dirs), so a skill that
@@ -1828,11 +1840,8 @@ def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
                 max_ns = max(max_ns, root_path.stat().st_mtime_ns)
             except OSError:
                 pass
-            for dirname in dirnames:
-                try:
-                    max_ns = max(max_ns, (root_path / dirname).stat().st_mtime_ns)
-                except OSError:
-                    pass
+            # Each retained child is statted on its own visit (or by onerror),
+            # not both here and there. Keep deep and symlink-target detection.
             if "SKILL.md" in filenames:
                 try:
                     max_ns = max(max_ns, (root_path / "SKILL.md").stat().st_mtime_ns)
@@ -1909,50 +1918,28 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     """
     import time
     profile_dir = Path(profile_dir).resolve()
-    now = time.time()
     skills_dir = profile_dir / "skills"
     config_path = profile_dir / "config.yaml"
 
-    # Always run the cheap stat-only probe first — this is what catches an
-    # out-of-band create/edit/delete within the same request (not after the TTL).
-    current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
-
-    # Read via .get() (not membership-check + index) so a concurrent
-    # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
-    # between the `in` test and the lookup.
-    cached = _SKILLS_STATS_CACHE.get(profile_dir)
-    if cached is not None:
-        enabled, compat, cached_mtime_ns, expiry = cached
-        # Fast path: files unchanged (by the cheap probe above) AND still within
-        # the TTL → serve cached without re-reading any SKILL.md. The mtime probe
-        # already ran, so an out-of-band change is caught immediately regardless
-        # of the TTL. On TTL expiry we deliberately fall through to a full
-        # recompute (the TTL is a safety net for mtime-preserving changes that
-        # the probe can't see — e.g. a git checkout that restores the old mtime).
-        if current_mtime_ns == cached_mtime_ns and now < expiry:
-            return enabled, compat
-
-    # Cache miss, mtime changed, or TTL expired — serialize per-profile so a
-    # burst of concurrent misses (cold startup) collapses to ONE compute instead
-    # of a thundering herd of simultaneous os.walk + SKILL.md parses (#5364).
+    # Serialize the probe with the compute, not just the compute. Every caller
+    # still observes the tree; cold/changed calls no longer walk it twice before
+    # parsing, and waiting callers probe AFTER the preceding compute finishes.
+    # Different profile homes retain independent locks (#5364).
     lock = _skills_stats_lock_for(profile_dir)
     with lock:
-        # Double-checked locking: another thread may have populated a fresh entry
-        # while we waited for the lock. Reuse it when the mtime we already probed
-        # still matches and the entry is within its TTL — no second compute.
+        current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+        # Use one .get(): concurrent explicit cache clears must not raise.
         cached = _SKILLS_STATS_CACHE.get(profile_dir)
         if cached is not None:
             enabled, compat, cached_mtime_ns, expiry = cached
             if current_mtime_ns == cached_mtime_ns and time.time() < expiry:
                 return enabled, compat
 
-        # Snapshot mtime BEFORE compute so any concurrent SKILL.md write during
-        # the compute window causes a mismatch on the next probe instead of
-        # silently serving stale data (TOCTOU).
-        new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+        # Keep the PRE-compute observation: changes during parsing must be
+        # detectable on the next call. TTL expiry still forces a full parse.
         res = _compute_profile_skills_stats(profile_dir)
         _SKILLS_STATS_CACHE[profile_dir] = (
-            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL
+            res[0], res[1], current_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL
         )
         return res
 
