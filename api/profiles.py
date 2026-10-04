@@ -1921,13 +1921,23 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     skills_dir = profile_dir / "skills"
     config_path = profile_dir / "config.yaml"
 
-    # Serialize the probe with the compute, not just the compute. Every caller
-    # still observes the tree; cold/changed calls no longer walk it twice before
-    # parsing, and waiting callers probe AFTER the preceding compute finishes.
-    # Different profile homes retain independent locks (#5364).
+    # Warm readers must not queue behind another reader's filesystem walk.
+    current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    cached = _SKILLS_STATS_CACHE.get(profile_dir)
+    if cached is not None:
+        enabled, compat, cached_mtime_ns, expiry = cached
+        if current_mtime_ns == cached_mtime_ns and time.time() < expiry:
+            return enabled, compat
+
+    # Serialize recomputation only. An uncontended miss can reuse its probe;
+    # a waiting caller needs a fresh observation after acquiring the lock.
     lock = _skills_stats_lock_for(profile_dir)
-    with lock:
-        current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    waited = not lock.acquire(blocking=False)
+    if waited:
+        lock.acquire()
+    try:
+        if waited:
+            current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
         # Use one .get(): concurrent explicit cache clears must not raise.
         cached = _SKILLS_STATS_CACHE.get(profile_dir)
         if cached is not None:
@@ -1942,6 +1952,8 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
             res[0], res[1], current_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL
         )
         return res
+    finally:
+        lock.release()
 
 
 _LIST_PROFILES_CACHE: tuple[list, float] | None = None

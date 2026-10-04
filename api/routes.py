@@ -12961,7 +12961,7 @@ def _handle_session_get(handler, parsed) -> bool:
         metadata_summary = None
         limited_sidecar_messages = None
         # Pure text memo only: share prefix-proof work with reconciliation, then
-        # release at request exit. No row identities or cache-validity decisions.
+        # release before projection. No row identities or cache-validity decisions.
         _comparison_cache = {}
         state_db_since_timestamp = None
         # Set by the limited-display path when the memoized merge can be
@@ -13018,6 +13018,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     msg_before=msg_before,
                 )
             if _display_cache_hit is not None:
+                _comparison_cache.clear()
                 state_db_messages = []
             else:
                 if (
@@ -13092,6 +13093,9 @@ def _handle_session_get(handler, parsed) -> bool:
                 _summary_message_count = metadata_summary["message_count"]
                 _summary_last_message_at = metadata_summary["last_message_at"]
                 _all_msgs = []
+        # Neither projection, model metadata nor serialization consumes this
+        # memo. Do not retain full DB-prefix strings through response handling.
+        _comparison_cache.clear()
         if not load_messages:
             if metadata_summary is None:
                 metadata_summary = _message_summary(_all_msgs)

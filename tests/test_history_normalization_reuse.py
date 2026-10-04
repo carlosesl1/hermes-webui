@@ -47,9 +47,11 @@ def test_merge_normalizes_equal_text_once_without_collapsing_occurrences(monkeyp
     assert max(visits.values()) == 1
 
 
-@pytest.mark.parametrize('before', [None, 330])
-@pytest.mark.parametrize('changed_prefix', [False, True])
-def test_get_reuses_text_between_prefix_proof_and_merge(tmp_path, monkeypatch, before, changed_prefix):
+@pytest.mark.parametrize('before,changed_prefix,cache_hit', [
+    (None, False, False), (330, False, False),
+    (None, True, False), (330, True, False), (None, False, True),
+])
+def test_get_reuses_text_between_prefix_proof_and_merge(tmp_path, monkeypatch, before, changed_prefix, cache_hit):
     from api import config
 
     session_dir = tmp_path / 'sessions'
@@ -93,6 +95,26 @@ def test_get_reuses_text_between_prefix_proof_and_merge(tmp_path, monkeypatch, b
 
     monkeypatch.setattr(models, '_normalized_session_message_content', counted)
     captured = {}
+    memos = []
+    prove_prefix = routes._state_db_since_timestamp_for_limited_display
+    window = routes._message_window_for_display
+
+    def capture_memo(*args, **kwargs):
+        result = prove_prefix(*args, **kwargs)
+        memo = kwargs.get('_comparison_cache')
+        if before is None:
+            assert memo, 'initial-tail fixture must populate the prefix memo'
+        memos.append(memo)
+        return result
+
+    def checked_window(*args, **kwargs):
+        assert memos and all(not memo for memo in memos), 'release memo before response projection'
+        return window(*args, **kwargs)
+
+    monkeypatch.setattr(routes, '_state_db_since_timestamp_for_limited_display', capture_memo)
+    monkeypatch.setattr(routes, '_message_window_for_display', checked_window)
+    if cache_hit:
+        monkeypatch.setattr(routes, '_display_merge_cached_messages', lambda *args, **kwargs: rows)
 
     def respond(_handler, data, status=200, **kwargs):
         assert status == 200, data

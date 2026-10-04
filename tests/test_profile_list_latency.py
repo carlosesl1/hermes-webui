@@ -2,6 +2,8 @@
 import os
 import shutil
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -190,3 +192,22 @@ def test_compute_failure_releases_lock_and_does_not_cache(layout):
             profiles._get_profile_skills_stats(homes[0])
     assert homes[0].resolve() not in profiles._SKILLS_STATS_CACHE
     assert profiles._get_profile_skills_stats(homes[0]) == (11, 12)
+
+
+def test_warm_probes_are_not_serialized_by_compute_lock(layout, monkeypatch):
+    homes, _ = layout
+    home = homes[0].resolve()
+    profiles._SKILLS_STATS_CACHE[home] = (11, 12, 1, time.time() + 300)
+    barrier = threading.Barrier(4, timeout=3)
+
+    def probe(*_args):
+        # All warm readers must reach the probe before any can return; no
+        # wall-clock speed assertion or synthetic latency benchmark.
+        barrier.wait()
+        return 1
+
+    monkeypatch.setattr(profiles, '_skill_tree_max_mtime_ns', probe)
+    with patch.object(profiles, '_compute_profile_skills_stats', side_effect=AssertionError('parse')):
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(profiles._get_profile_skills_stats, home) for _ in range(4)]
+            assert [f.result(timeout=5) for f in futures] == [(11, 12)] * 4
