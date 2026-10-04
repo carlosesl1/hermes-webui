@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover
     _msvcrt = None
 
 import api.config as _cfg
+from api.compaction_provenance import is_compaction_replay
 from api.compression_anchor import is_context_compression_marker
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
@@ -8348,7 +8349,7 @@ def _project_state_db_message(row, available, id_col, optional):
         value = row[col]
         if value in (None, ''):
             continue
-        if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
+        if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items', 'display_metadata'}:
             value = _json_loads_if_string(value)
         msg[col] = value
     if (
@@ -8470,6 +8471,8 @@ def get_state_db_session_messages(
                 # projection strips it before any direct API request.
                 'api_content',
                 'message_uid',
+                'display_kind',
+                'display_metadata',
             ]
             id_col = ['id'] if 'id' in available else []
             revision_cols = []
@@ -8864,6 +8867,7 @@ def get_state_db_regeneration_tail_snapshot(
                 'tool_call_id', 'tool_calls', 'tool_name', 'reasoning',
                 'reasoning_details', 'codex_reasoning_items', 'reasoning_content',
                 'codex_message_items', 'api_content', 'message_uid',
+                'display_kind', 'display_metadata',
             ]
             tail_select = ['id', 'role', 'content', 'timestamp'] if 'id' in available else ['role', 'content', 'timestamp']
             for col in optional + (['active'] if 'active' in available else []):
@@ -9149,6 +9153,12 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
             and not target.get("message_uid")
             and _message_private_identity_compatible(target, source)):
         target["message_uid"] = source_uid
+    # Carry only explicit replay provenance on a content-equal duplicate. A
+    # matching source UID alone must never label its original human occurrence.
+    if (is_compaction_replay(source) and target.get("role") == "user"
+            and not target.get("display_kind") and not target.get("display_metadata")
+            and target.get("content") == source.get("content")):
+        target["display_metadata"] = copy.deepcopy(source["display_metadata"])
     for key in _SESSION_MESSAGE_DISPLAY_METADATA_KEYS:
         if _message_display_metadata_value_present(target.get(key)):
             continue

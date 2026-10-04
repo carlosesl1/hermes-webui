@@ -58,6 +58,10 @@ from api.helpers import (
     scrub_internal_replay_fields,
     _redact_text,
 )
+from api.compaction_provenance import (
+    display_without_compaction_replays, install_compaction_replay_provenance,
+    is_compaction_replay,
+)
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
@@ -5652,6 +5656,8 @@ def _sanitize_messages_for_api(
             for key in ("timestamp", "message_uid"):
                 if key in msg:
                     sanitized[key] = copy.deepcopy(msg[key])
+            if is_compaction_replay(msg):
+                sanitized["display_metadata"] = copy.deepcopy(msg["display_metadata"])
         if sanitized.get("role") not in {"user", "assistant"}:
             sanitized.pop("api_content", None)
         elif not isinstance(sanitized.get("api_content"), str) or not sanitized.get("api_content"):
@@ -7119,6 +7125,7 @@ def _merge_display_messages_after_agent_result(
     the current user turn onward. Synthetic compaction/reference markers remain
     internal recovery material and must not become visible user/assistant turns.
     """
+    previous_display = display_without_compaction_replays(previous_display)
     previous_display = [
         m for m in list(previous_display or [])
         if not _is_context_compression_marker(m)
@@ -7192,8 +7199,14 @@ def _merge_display_messages_after_agent_result(
     # Same marker filter for the model-history inputs: the synthetic verify-loop
     # answer/nudge live in the agent's returned messages and prior context, and
     # would otherwise slip into the merged transcript as a real delta. (#5334)
-    previous_context = _drop_synthetic_control_messages(previous_context)
-    result_messages = _drop_synthetic_control_messages(result_messages)
+    # Only these local DISPLAY inputs lose replay rows; original model-context
+    # arrays, their roles and active-turn ownership remain untouched.
+    previous_context = display_without_compaction_replays(
+        _drop_synthetic_control_messages(previous_context), witnesses=previous_display,
+    )
+    result_messages = display_without_compaction_replays(
+        _drop_synthetic_control_messages(result_messages), witnesses=previous_display,
+    )
     if not result_messages:
         return previous_display
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
@@ -10830,6 +10843,10 @@ def _run_agent_streaming(
                             logger.debug("Failed to close evicted agent for session %s", _evicted_sid, exc_info=True)
                         logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
                     logger.debug('[webui] Created new agent for session %s', session_id)
+
+            # Instance-only compatibility hook, before any run/compaction. Covers
+            # fresh, cached and ephemeral agents without mutating core classes.
+            install_compaction_replay_provenance(getattr(agent, "context_compressor", None))
 
             # Store agent instance for cancel/interrupt propagation
             with STREAMS_LOCK:

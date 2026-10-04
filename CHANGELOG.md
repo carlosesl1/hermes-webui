@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Compaction replay visibility
+
+- Compaction replay no longer appears as a new human message after the final answer. WebUI marks newly created replay rows with durable, model-actionable display provenance, preserves it through SQLite/reload, and keeps raw paging coordinates intact. Conservative same-UID legacy projection preserves genuine quotations and repeated turns. Desktop/mobile browser and isolated-core regressions cover final visibility and successive compactions.
+
 ### Fork: background activity and chat reliability
 
 - Trusted background continuations use a compact, keyboard-accessible disclosure without deleting the original transcript. Deferred sibling process updates can share one bounded continuation; rejected admission retains their payloads. Source-less legacy messages and virtualized spacer windows keep a conservative flat presentation.

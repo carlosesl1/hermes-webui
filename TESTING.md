@@ -15,6 +15,19 @@
 
 ---
 
+## Compaction replay visibility
+
+See [the compaction display/context contract and commands](docs/long-chat-reliability.md#compaction-replay-is-context-not-a-new-human-turn).
+Run `tests/test_compaction_provenance.py` and `tests/test_compaction_replay_visibility.py`
+for producer provenance, model/wire separation, legacy quotations, real GET raw
+coordinates, save/reload and active-turn settlement. The optional
+`tests/browser_compaction_replay_visibility.py` validates done→refresh→older page→reload→replay
+at 1440×900 and 522×1232; use an existing compatible Playwright runtime and
+`COMPACTION_EVIDENCE` for screenshots/results. The installed-core probe is
+`tests/probe_compaction_replay_core.py`, with the strict isolated environment
+specified in its module documentation. None of these gates implies live-provider
+or production deployment validation.
+
 ## Static JS runtime lint (brick-class regression guard)
 
 Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function

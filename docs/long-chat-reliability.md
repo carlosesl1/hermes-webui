@@ -116,6 +116,68 @@ Existing persisted duplicates require a separate backed-up provenance-based repa
 This source change neither migrates nor removes real history. Production model
 latency spikes and additional network/reconnect canaries remain follow-up work.
 
+## Compaction replay is context, not a new human turn
+
+Some core versions restore an unfinished task by creating a user-role replay with
+`[STILL IN PROGRESS ...]`, the original logical UID, and no original timestamp.
+Append-only reconciliation can legitimately append that derived row after the
+final response. A tall replay then pushes the retained final out of the viewport;
+retention in state or the DOM does not establish that the reader can see it.
+
+WebUI installs an idempotent instance-local hook on the compressor's
+`_reappend_inflight_user_task` before a conversation runs. Only a newly created
+standalone user row at this trusted boundary is annotated. Existing carriers,
+original tasks, class methods, content, role and UID are not rewritten. Unsupported
+core interfaces degrade without guessing by prefix.
+
+The durable annotation is `display_metadata.webui_compaction_replay`, version 1,
+with an optional `source_message_uid`. It intentionally does **not** set
+`display_kind`: the compatible core treats any nonempty kind as non-actionable,
+which would lose the unfinished task at the next compression. Internal Agent
+history retains the annotation; direct-provider and core wire projections strip
+it while retaining the replay text and user role. Test the replay as the sole
+surviving actionable task, not just next to an unwrapped original.
+
+Full and regeneration-tail SQLite readers preserve optional display metadata with
+legacy-schema fallback. Content-equal cross-source reconciliation retains explicit
+provenance, but sharing a UID alone never labels the original human message.
+Newly settled display history excludes proven replays. Session GET instead applies
+a read-only projection and keeps all raw rows/indices; the browser and renderable
+window selector ignore the annotation. Pagination, edit and regeneration offsets
+continue to address canonical data. Context and persisted history are not migrated.
+
+For legacy text replays without provenance, classification requires the exact
+core envelope, a nonempty shared UID, a nonconflicting original human witness and
+matching task text; only the runtime workspace prefix and recognized preserved
+notices are tolerated. Unidentified, conflicting, unfamiliar and multimodal legacy
+rows remain visible. Human quotations with their own UID and legitimate repeated
+requests remain visible. This is not global text deduplication or blanket hiding.
+
+### Compaction visibility regression gates
+
+```sh
+./scripts/test.sh tests/test_compaction_provenance.py \
+  tests/test_compaction_replay_visibility.py
+# Use an existing Playwright-compatible Python/browser pair:
+COMPACTION_EVIDENCE=/path/to/output python tests/browser_compaction_replay_visibility.py
+# Expected nonzero: old UI + the same unclassified legacy payload:
+COMPACTION_BASELINE=fefaaf89c91ff79ca7f924955ee28735dfafd7d8 \
+  COMPACTION_EVIDENCE=/path/to/baseline python tests/browser_compaction_replay_visibility.py
+```
+
+The Chromium fixture uses backend-generated synthetic reconciliation/window
+payloads, 800 initial rows, real static assets and native EventSource listeners.
+It exercises done, refresh, older-page interaction, reload and terminal replay at
+1440×900 and 522×1232, checking a unique visible final, literal human quotations,
+raw coordinates, overflow and console errors without scrolling to the answer.
+Boot/CDN and APIs are controlled fixtures, not real-provider/network-timing E2E.
+The separate lifecycle fixture starts an isolated HTTP server and deterministic
+Gateway. `tests/probe_compaction_replay_core.py` exercises the actual installed
+core replay method, temporary SessionDB compaction, incremental flush, wire
+stripping, WebUI readers and save/reload with text/multimodal tasks and successive
+compressions. Follow that file's strict pre-launch sandbox/ABI instructions;
+there is no provider inference, real profile read or live core modification.
+
 ## Rendering caches
 
 - Long messages use the compact key only to locate a candidate. Full-source

@@ -630,6 +630,7 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
+  if(_isCompactionReplayMessage(m)) return false;
   if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
@@ -11070,6 +11071,7 @@ function _pendingCurrentTailUserMessage(messages){
     if(!msg) continue;
     if(String(msg.role||'')==='user'){
       // Compaction rows are synthetic user-role markers, not submitted turns.
+      if(typeof _isCompactionReplayMessage==='function'&&_isCompactionReplayMessage(msg)) continue;
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
       return msg;
     }
@@ -11150,6 +11152,7 @@ function _pendingActiveTurnUserMessage(messages, session){
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg||String(msg.role||'')!=='user') continue;
+    if(typeof _isCompactionReplayMessage==='function'&&_isCompactionReplayMessage(msg)) continue;
     if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
     // Public projections replace the private token with this authoritative marker.
     if(msg._active_turn_user===true) return msg;
@@ -15356,6 +15359,10 @@ function _collectHandoffSummaryStates(messages){
     if(state) states.push({state, rawIdx:i});
   }
   return states;
+}
+function _isCompactionReplayMessage(m){
+  return !!(m && m.role==='user' && !m.display_kind
+    && m.display_metadata?.webui_compaction_replay?.version===1);
 }
 function _isContextCompactionMessage(m){
   if(!m||!m.role||m.role==='tool') return false;

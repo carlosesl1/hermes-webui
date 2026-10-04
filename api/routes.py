@@ -11,6 +11,7 @@ import errno
 import io
 import gzip
 import json
+from api.compaction_provenance import is_compaction_replay, project_compaction_replays
 from api.sse_chunked import end_sse_headers
 from api.sse_lease import SSELease
 import logging
@@ -8784,7 +8785,7 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     """
     if not isinstance(message, dict):
         return False
-    if _is_empty_partial_activity_message(message):
+    if is_compaction_replay(message) or _is_empty_partial_activity_message(message):
         return False
     role = str(message.get("role") or "").strip().lower()
     return bool(role and role != "tool")
@@ -13117,6 +13118,11 @@ def _handle_session_get(handler, parsed) -> bool:
             _summary_message_count = None
             _summary_last_message_at = None
         if load_messages:
+            # Read-only provenance projection: keep every raw row/index so edit,
+            # regeneration and pagination coordinates still address canonical data.
+            _all_msgs = project_compaction_replays(
+                _all_msgs, witnesses=getattr(s, "messages", ()) or (),
+            )
             _truncated_msgs, _messages_offset = _message_window_for_display(
                 _all_msgs,
                 msg_limit=msg_limit,
