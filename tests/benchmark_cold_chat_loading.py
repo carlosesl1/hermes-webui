@@ -28,6 +28,8 @@ def main():
     parser.add_argument('--trials', type=int, default=5)
     parser.add_argument('--rows', type=int, default=3000)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--handler-allocations', action='store_true',
+                        help='Trace complete GET allocations separately; timings include tracing overhead')
     args = parser.parse_args()
     if not 1 <= args.trials <= 10 or not 100 <= args.rows <= 10000:
         parser.error('trials must be 1..10; rows must be 100..10000')
@@ -82,13 +84,15 @@ def main():
             gc.collect()
 
         def measured(call, *, allocations=False):
-            samples, peaks, digests = [], [], []
+            samples, cpu_samples, peaks, digests = [], [], [], []
             for _ in range(args.trials):
                 cold()
                 if allocations:
                     tracemalloc.start()
                 start = time.perf_counter()
+                cpu_start = time.process_time()
                 data = call()
+                cpu_samples.append(time.process_time() - cpu_start)
                 samples.append(time.perf_counter() - start)
                 if allocations:
                     peaks.append(tracemalloc.get_traced_memory()[1])
@@ -97,6 +101,7 @@ def main():
                 del data
             assert len(set(digests)) == 1, digests
             return {'seconds': samples, 'median_seconds': statistics.median(samples),
+                    'cpu_seconds': cpu_samples, 'median_cpu_seconds': statistics.median(cpu_samples),
                     'peak_bytes': peaks, 'median_peak_bytes': statistics.median(peaks) if peaks else None,
                     'output_sha256': digests[0]}
 
@@ -126,8 +131,9 @@ def main():
                 with sqlite3.connect(db) as conn:
                     content = original_first_content if case == 'matched_prefix' else 'Recovered older row: ' + original_first_content
                     conn.execute('UPDATE messages SET content=? WHERE id=1', (content,))
-                results['cases'][case + '_tail'] = measured(detail)
-                results['cases'][case + '_older_page'] = measured(lambda: detail(before=args.rows - 30))
+                results['cases'][case + '_tail'] = measured(detail, allocations=args.handler_allocations)
+                results['cases'][case + '_older_page'] = measured(
+                    lambda: detail(before=args.rows - 30), allocations=args.handler_allocations)
         results['canonical_unchanged'] = canonical_digest == hashlib.sha256(path.read_bytes()).hexdigest()
         assert results['canonical_unchanged']
         encoded = json.dumps(results, indent=2) + '\n'

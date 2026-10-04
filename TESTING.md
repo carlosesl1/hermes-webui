@@ -168,6 +168,29 @@ not OS page caches. It reports traced allocation separately from handler timings
 and verifies output/canonical hashes; it is not a wall-clock CI gate or production
 latency claim.
 
+For the profile/history latency follow-up, run with the same isolated state:
+
+```sh
+./scripts/test.sh tests/test_history_normalization_reuse.py \
+  tests/test_profile_list_latency.py \
+  tests/test_issue4783_profile_skills_mtime_cache.py \
+  tests/test_issue5364_skills_stats_thundering_herd.py
+PROFILE_LATENCY_BENCHMARK_JSON=/absolute/profile-results.json \
+  ./scripts/test.sh tests/test_profile_list_latency_benchmark.py -q
+```
+
+The profile benchmark uses synthetic homes and explicit core-helper doubles;
+`PROFILE_LATENCY_BASELINE_SOURCE=/path/to/baseline/api/profiles.py` selects a
+read-only baseline. It reports cold stats, row refresh and list-cache hits
+separately, with untimed fixture creation and separate profiling instrumentation.
+It is opt-in and does not inspect actual user profiles.
+
+The cold-chat benchmark also reports process CPU time. Alternate baseline/patch
+order with `--trials 1` in separate processes to mitigate shared-host timing drift.
+Use a separate `--handler-allocations` run for complete GET traced allocation;
+tracemalloc substantially inflates timings, so do not report that time as ordinary
+handler latency. Compare canonical/output hashes for every case.
+
 For duplicate prevention, run the occurrence and settlement regression tests:
 `./scripts/test.sh tests/test_agent_occurrence_roundtrip.py tests/test_duplicate_settlement_boundaries.py`.
 `python tests/browser_duplicate_settlement.py` exercises incompatible history

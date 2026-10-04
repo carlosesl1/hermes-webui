@@ -147,8 +147,11 @@ A small HTTP tail does not avoid loading a large native sidecar. Profiling a
 synthetic sidecar plus state.db showed repeated comparison-text normalization in
 reconciliation was more expensive than JSON parsing. The append-only merger now
 shares normalized content between its comparison keys within ONE invocation.
-Prepared dictionaries stay alive and their content stays fixed while that cache
-is used. The cache is not attached to a Session, shared between requests, keyed
+The bounded display GET also shares pure normalization work between its older-prefix
+proof and append-only reconciliation, keyed by exact input text and normalization
+mode, not temporary row-object IDs. Equal text never reuses occurrence decisions.
+The request memo is cleared before projection/metadata/serialization, including
+display-cache hits. The cache is not attached to a Session, shared between requests, keyed
 by file size/timestamp, or reused after an edit. Literal workspace tags in the
 sidecar and protocol prefixes in state.db retain their different semantics;
 provider sidecars and occurrence/truncation rules are unchanged.
@@ -160,7 +163,7 @@ The original snapshot save signature and atomic-replacement checks are retained.
 This lowers temporary allocation; it is NOT partial-file parsing, constant-memory
 history loading, a schema migration, or a persisted history cache.
 
-### Measured scope
+### Initial cold-load measurement
 
 One five-trial synthetic comparison against the previous implementation used
 3,000 messages, a 33,179,079-byte sidecar and a synthetic SQLite database. The same
@@ -192,6 +195,55 @@ navigates A → B → back to A, and reloads at 1440×900 and 522×1232. It chec
 saved answer, coordinates, horizontal overflow, uncaught JavaScript errors and
 unchanged canonical bytes. This is persisted-history browser coverage, not a live
 provider or in-flight session-switch race test.
+
+## Profile and history latency follow-up
+
+The follow-up removes repeated pure text normalization in a display request and
+redundant skill-tree stat probes. It does not skip authoritative reconciliation,
+increase cache TTLs, cache profile rows for longer, change model context, or edit
+persisted history. Profile warm readers still probe outside the recompute lock;
+only a cold/changed/expired recompute is serialized per profile. Uncontended misses
+reuse their pre-compute observation; waiters re-probe after acquiring the lock.
+Directory traversal retains nested/symlink/support-pruning/error semantics.
+
+Against the duplicate-fix baseline `e8d1c6e4`, five interleaved A/B pairs on the same
+3,000-row / 33,179,079-byte fixture produced these handler medians:
+
+| Case | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| Matching-prefix tail | 1.116 s | 0.605 s | 45.8% |
+| Matching-prefix older page | 0.968 s | 0.663 s | 31.5% |
+| Changed-prefix tail | 1.595 s | 0.897 s | 43.8% |
+| Changed-prefix older page | 0.972 s | 0.691 s | 28.9% |
+
+Process CPU medians fell 24.9–38.0% in those four cases. A separate three-trial
+tracemalloc run measured 11.5–20.7% lower complete-handler peak allocation;
+matching-prefix tail fell from 101,918,913 to 81,021,878 bytes. `Session.load`
+allocation itself was unchanged in this follow-up. All canonical/output hashes
+matched. No timing threshold is imposed in CI; shared-host variance remains
+material (one patched changed-prefix older-page sample was 2.136 s despite its
+0.691 s median). Traced time is not mixed into untraced latency results.
+
+A separate seven-trial synthetic profile fixture (four profiles, 120 skills each,
+explicit core-helper doubles) measured cold stats/listing at 617.4 → 462.8 ms and
+row refresh at 52.2 → 35.5 ms. The deterministic reduction is eight to four tree
+probes on an uncontended cold listing, plus fewer duplicate directory stats.
+The cold profile still parses its skill/config metadata; this is not a claim
+that an observed production 8-second spike has been eliminated. Separate actual-core
+validation used disposable profile homes and verified counts, metadata, deep edits,
+additions, config invalidation, isolation, and warm no-reparse behavior.
+
+`test_history_normalization_reuse.py` checks once-per-exact-text work, edited inputs,
+request memo release, and 500 differential cases against uncached semantics.
+`test_profile_list_latency.py` checks invalidation, traversal parity, cold concurrent
+compute sharing, error unlock, and concurrent warm probes with a barrier rather
+than timing assertions. The targeted integration gate passed 1,296 tests with 34
+skips both on product source and on a disposable composition with deployment
+overlays. Skips include unavailable optional core modules, fixture module cleanup,
+and the opt-in benchmark; this is not full-suite certification. Chromium cold-load,
+duplicate settlement, real-server deterministic lifecycle, and temporary real-core
+compaction/flush gates also passed. No live model call or production restart was
+used to validate this follow-up; deployed latency needs a separate release check.
 
 ## Reproduction and verification
 
