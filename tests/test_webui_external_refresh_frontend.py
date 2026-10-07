@@ -429,12 +429,13 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
     # The width hint is applied only when it stays within the server msg_limit
     # ceiling; an over-ceiling hint would be clamped by the backend and could
-    # silently shrink an already-loaded transcript, so it falls back to the bare
-    # full-transcript path (#6152/#6154 ceiling; Codex gate silent row-loss fix).
+    # silently shrink an already-loaded transcript, so request every row through
+    # render_preview instead. This preserves row coordinates while bounding
+    # field payloads; only an explicit full-content export bypasses previews.
     # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
     # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
     assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;" in SESSIONS_JS
-    assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
+    assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '&render_preview=1';" in SESSIONS_JS
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function loadSession(sid)")
@@ -446,6 +447,37 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert capture_pos < clear_pos < reset_pos
     assert "const sameSessionForceReload = forceReload && currentSid===sid;" in load_body
     assert "renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined)" in load_body
+
+
+def test_refresh_request_bounds_fields_without_losing_over_ceiling_rows():
+    """Execute the production fetch path, not just its source-string contract."""
+    function = _function_body(SESSIONS_JS, "_ensureMessagesLoaded")
+    result = _run_node(textwrap.dedent("""
+        const S = {messages: []};
+        const _loadingSessionId = 'fixture';
+        const _msgLimitMax = 500;
+        let requested = null;
+        let cleared = 0;
+        const urls = [];
+        function _messageReloadLimitForSession() { return requested; }
+        function _clearSameSessionForceReloadHint() { cleared++; }
+        async function api(url) { urls.push(url); return undefined; }
+    """) + function + textwrap.dedent("""
+        (async () => {
+            for (const limit of [30, 500, 501, null]) {
+                requested = limit;
+                await _ensureMessagesLoaded('fixture', {force: true});
+            }
+            console.log(JSON.stringify({urls, cleared}));
+        })().catch(error => { console.error(error); process.exitCode = 1; });
+    """))
+    assert result["cleared"] == 4
+    assert result["urls"] == [
+        "/api/session?session_id=fixture&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1",
+        "/api/session?session_id=fixture&messages=1&resolve_model=0&msg_limit=500&expand_renderable=1",
+        "/api/session?session_id=fixture&messages=1&resolve_model=0&render_preview=1",
+        "/api/session?session_id=fixture&messages=1&resolve_model=0&render_preview=1",
+    ]
 
 
 def test_same_width_force_reload_invalidates_visible_message_cache():
