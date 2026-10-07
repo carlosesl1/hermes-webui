@@ -1,6 +1,7 @@
 name: Release & Docker
 
 on:
+  workflow_dispatch:  # Build selected ref by full SHA; no release or deployment.
   push:
     tags:
       - 'v*'
@@ -19,8 +20,10 @@ jobs:
       # Check whether this is a stable or experimental release
       - name: Detect release channel
         id: channel
+        env:
+          RELEASE_REF: ${{ github.ref }}
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          if [[ "$RELEASE_REF" == refs/tags/v* ]]; then
             echo "is_stable=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_stable=false" >> "$GITHUB_OUTPUT"
@@ -28,6 +31,7 @@ jobs:
 
       # Create GitHub Release from tag with auto-generated notes
       - name: Create GitHub Release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
@@ -52,13 +56,15 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=match,pattern=v(\d+\.\d+(?:\.\d+)?),group=1
-            type=match,pattern=exp-v(\d+\.\d+(?:\.\d+)?),group=1
-            type=raw,value=latest,enable=${{ steps.channel.outputs.is_stable == 'true' }}
-            type=raw,value=experimental,enable=${{ steps.channel.outputs.is_stable == 'false' }}
+            type=match,pattern=v(\d+\.\d+(?:\.\d+)?),group=1,enable=${{ github.event_name == 'push' }}
+            type=match,pattern=exp-v(\d+\.\d+(?:\.\d+)?),group=1,enable=${{ github.event_name == 'push' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && steps.channel.outputs.is_stable == 'true' }}
+            type=raw,value=experimental,enable=${{ github.event_name == 'push' && steps.channel.outputs.is_stable == 'false' }}
+            type=sha,format=long,prefix=sha-
 
       # Build and push multi-arch image (amd64 + arm64)
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -66,6 +72,20 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: HERMES_VERSION=${{ github.ref_name }}
+          build-args: |
+            HERMES_VERSION=${{ github.event_name == 'push' && github.ref_name || format('sha-{0}', github.sha) }}
+            HERMES_SOURCE=https://github.com/${{ github.repository }}
+            HERMES_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Record immutable image reference (not deployment)
+        env:
+          IMAGE_NAMES: ${{ steps.meta.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          first_tag="${IMAGE_NAMES%%$'\n'*}"
+          image="${first_tag%:*}"
+          printf 'Source revision: `%s`\n\nImmutable image: `%s@%s`\n' \
+            "$SOURCE_REVISION" "$image" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"

@@ -137,7 +137,14 @@ COPY --chown=root:root . /apptoo
 # CI passes: --build-arg HERMES_VERSION=$(git describe --tags --always)
 # Local builds that omit the arg get "unknown" as the fallback.
 ARG HERMES_VERSION=unknown
-RUN echo "__version__ = '${HERMES_VERSION}'" > /apptoo/api/_version.py
+ARG HERMES_SOURCE=https://github.com/carlosesl1/hermes-webui
+ARG HERMES_REVISION=unknown
+LABEL org.opencontainers.image.source="${HERMES_SOURCE}" \
+      org.opencontainers.image.revision="${HERMES_REVISION}" \
+      org.opencontainers.image.version="${HERMES_VERSION}"
+RUN HERMES_VERSION="$HERMES_VERSION" HERMES_SOURCE="$HERMES_SOURCE" \
+    HERMES_REVISION="$HERMES_REVISION" \
+    python3 /apptoo/scripts/write_distribution_metadata.py /apptoo/api/_version.py
 
 # Default to binding all interfaces (required for container networking)
 ENV HERMES_WEBUI_HOST=0.0.0.0

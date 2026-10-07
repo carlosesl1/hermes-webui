@@ -114,7 +114,7 @@ def test_existing_display_fields_are_not_overwritten(display):
     assert result[-1].get("display_metadata") is inflight.get("display_metadata")
 
 
-@pytest.mark.parametrize("mode", ["noop", "merge", "reuse", "inflight", "assistant", "multiple", "new-list", "replace"])
+@pytest.mark.parametrize("mode", ["noop", "merge", "reuse", "inflight", "assistant", "multiple", "copied-list", "reordered-list", "replace"])
 def test_unknown_or_nonstandalone_shapes_do_not_stamp_rows(mode):
     class DifferentCompressor:
         def _reappend_inflight_user_task(self, compressed, inflight):
@@ -128,8 +128,10 @@ def test_unknown_or_nonstandalone_shapes_do_not_stamp_rows(mode):
                 compressed.append({"role": "assistant", "content": "unrelated"})
             elif mode == "multiple":
                 compressed.extend([dict(inflight), dict(inflight)])
-            elif mode == "new-list":
-                return compressed + [dict(inflight)]
+            elif mode == "copied-list":
+                return [dict(row) for row in compressed] + [dict(inflight)]
+            elif mode == "reordered-list":
+                return list(reversed(compressed)) + [dict(inflight)]
             elif mode == "replace":
                 compressed[0] = dict(compressed[0])
                 compressed.append(dict(inflight))

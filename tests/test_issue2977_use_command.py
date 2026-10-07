@@ -1,4 +1,6 @@
 from pathlib import Path
+import shutil
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,15 +58,14 @@ def test_use_entry_has_subArgs_skills():
 
 
 def test_directive_consumed_at_injection_site():
-    """_forcedSkillDirectivePending is cleared at the consume site, not in finally."""
-    src = read("static/messages.js")
-    finally_part = src.split("finally")[1] if "finally" in src else ""
-    assert "_forcedSkillDirectivePending = null;" not in finally_part, \
-        "_forcedSkillDirectivePending must NOT be cleared in the finally block"
-    assert "const _directivePayload = await _pending.promise;" in src, \
-        "consume site must await the pending promise"
-    assert "_forcedSkillDirectivePending = null;" in src, \
-        "_forcedSkillDirectivePending must be cleared somewhere in messages.js"
+    """Consume once, awaiting content without clearing a replacement /use intent."""
+    node = shutil.which("node")
+    assert node, "node not on PATH"
+    result = subprocess.run(
+        [node, str(ROOT / "tests" / "ci_behavior.cjs"), "directive"],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_directive_injection_before_empty_guard():

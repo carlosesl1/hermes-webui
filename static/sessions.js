@@ -3164,11 +3164,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
   // silently SHRINK an already-loaded transcript that had more than the ceiling
   // of rows visible (rows 400–999 replaced by 500–999). When the requested
-  // window exceeds the ceiling, fall back to the bare full-transcript request
+  // window exceeds the ceiling, request all rows with render-only previews
   // (no msg_limit / no expand_renderable) so a same-session refresh never drops
-  // already-loaded older rows (Codex gate #6154, silent row-loss).
+  // already-loaded older rows. Explicit export still loads full content.
   const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
-  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
+  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '&render_preview=1';
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
@@ -3870,7 +3870,7 @@ async function _ensureAllMessagesLoaded(force = false) {
   _loadingOlder = true;
   try {
     const sid = S.session.session_id;
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&content_full=1`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
     // Session identity alone cannot distinguish A -> B -> A navigation.

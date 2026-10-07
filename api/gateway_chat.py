@@ -35,6 +35,7 @@ from api.config import (
     unregister_stream_owner,
     update_active_run,
 )
+from api.compaction_provenance import gateway_compaction_provenance_capability
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session
 # Compatibility export for integrations that imported the old gateway merge seam.
@@ -936,6 +937,9 @@ def _run_gateway_chat_streaming(
         # path (the teardown finally below never runs when we early-return here).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
+    # Both Gateway APIs execute compaction remotely; no local instance hook can
+    # certify their provenance contract. This emits a bounded, static diagnostic.
+    gateway_compaction_provenance_capability()
     register_active_run(
         stream_id,
         session_id=session_id,

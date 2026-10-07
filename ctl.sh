@@ -351,9 +351,11 @@ _is_owned_webui_pid() {
   args_slash="${args//\\//}"
   [[ "${args_slash}" == *"${state_repo_slash}/bootstrap.py"* ||
      "${args_slash}" == *"${state_repo_slash}/server.py"* ||
+     "${args_slash}" == *"${state_repo_slash}/webui_runtime.py"* ||
      "${args_slash}" == *"${state_repo_slash}/start.sh"* ||
      ( -n "${state_repo_win_slash}" && "${args_slash}" == *"${state_repo_win_slash}/bootstrap.py"* ) ||
      ( -n "${state_repo_win_slash}" && "${args_slash}" == *"${state_repo_win_slash}/server.py"* ) ||
+     ( -n "${state_repo_win_slash}" && "${args_slash}" == *"${state_repo_win_slash}/webui_runtime.py"* ) ||
      ( -n "${state_repo_win_slash}" && "${args_slash}" == *"${state_repo_win_slash}/start.sh"* ) ||
      ( -n "${state_python}" && "${args}" == *"${state_python}"* ) ||
      ( -n "${state_python_slash}" && "${args_slash}" == *"${state_python_slash}"* ) ||

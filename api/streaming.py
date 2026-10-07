@@ -59,7 +59,7 @@ from api.helpers import (
     _redact_text,
 )
 from api.compaction_provenance import (
-    display_without_compaction_replays, install_compaction_replay_provenance,
+    display_without_compaction_replays, prepare_agent_compaction_provenance,
     is_compaction_replay,
 )
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -10846,7 +10846,7 @@ def _run_agent_streaming(
 
             # Instance-only compatibility hook, before any run/compaction. Covers
             # fresh, cached and ephemeral agents without mutating core classes.
-            install_compaction_replay_provenance(getattr(agent, "context_compressor", None))
+            prepare_agent_compaction_provenance(agent)
 
             # Store agent instance for cancel/interrupt propagation
             with STREAMS_LOCK:

@@ -8,7 +8,10 @@ legacy projection requires an exact same-UID original as well as the core envelo
 from collections.abc import Mapping
 from functools import wraps
 from itertools import chain
+import inspect
+import logging
 import re
+from threading import Lock
 
 
 _REPLAY_HEADER = (
@@ -101,36 +104,102 @@ def is_compaction_replay(message: object) -> bool:
     )
 
 
+# A fixed vocabulary and bit mask, not an instance/profile/session registry.
+# No object names, exception strings, paths, UIDs or task text enter diagnostics.
+_DIAGNOSTIC_REASONS = (
+    "missing_hook", "read_only_hook", "signature_incompatible", "remote_capability_unknown",
+)
+_diagnostic_mask = 0
+_diagnostic_lock = Lock()
+logger = logging.getLogger(__name__)
+
+
+def _diagnose_once(reason):
+    global _diagnostic_mask
+    bit = 1 << _DIAGNOSTIC_REASONS.index(reason)
+    with _diagnostic_lock:
+        if _diagnostic_mask & bit:
+            return
+        _diagnostic_mask |= bit
+    logger.warning(
+        "Compaction replay provenance: %s; producer coverage is not established; "
+        "conservative read-only legacy projection remains available", reason,
+    )
+
+
+def prepare_agent_compaction_provenance(agent: object) -> bool:
+    """Call before each local run (streaming or synchronous), including cache hits."""
+    return install_compaction_replay_provenance(getattr(agent, "context_compressor", None))
+
+
+def gateway_compaction_provenance_capability() -> str:
+    """Remote core capability is unknown; never pretend a local hook covers it."""
+    _diagnose_once("remote_capability_unknown")
+    return "unknown"
+
+
+def _compatible_signature(original):
+    try:
+        signature = inspect.signature(original)
+    except (TypeError, ValueError):
+        return None
+    parameters = tuple(signature.parameters.values())
+    if (len(parameters) < 2
+            or tuple(p.name for p in parameters[:2]) != ("compressed", "inflight")
+            or any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in parameters[:2])
+            or any(p.default is p.empty and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+                   for p in parameters[2:])
+            or inspect.iscoroutinefunction(original)
+            or inspect.isgeneratorfunction(original)
+            or inspect.isasyncgenfunction(original)):
+        return None
+    return signature
+
+
 def install_compaction_replay_provenance(compressor: object) -> bool:
     """Wrap this instance's replay producer once; report hook availability.
 
     Supported core shape: ``_reappend_inflight_user_task(compressed, inflight)``
-    returns the same list, either unchanged/merged or with one fresh user row
-    appended. Unknown shapes are left untouched. The original call's return,
-    exceptions, and model-facing payload are preserved. All row witnesses are
-    local to a call; no session/profile state is captured by the installed hook.
+    returns a list with the original prefix objects in order and one fresh user
+    row appended (same or newly allocated list). Unknown shapes stay untouched.
+    The original call's return, exceptions, and model-facing payload are preserved.
+    All row witnesses are local to a call; no session/profile state is captured.
     """
     if isinstance(compressor, type):
+        _diagnose_once("signature_incompatible")
         return False
     original = getattr(compressor, "_reappend_inflight_user_task", None)
     if not callable(original):
+        _diagnose_once("missing_hook")
         return False
     if getattr(original, _WRAPPED, False):
         return True
+    signature = _compatible_signature(original)
+    if signature is None:
+        _diagnose_once("signature_incompatible")
+        return False
 
     @wraps(original)
-    def reappend_with_provenance(compressed, inflight):
+    def reappend_with_provenance(*args, **kwargs):
+        try:
+            bound = signature.bind(*args, **kwargs)
+        except TypeError:
+            # Delegate invalid calls too: preserve the core's own exception.
+            return original(*args, **kwargs)
+        bound.apply_defaults()
+        compressed = bound.arguments["compressed"]
+        inflight = bound.arguments["inflight"]
         # Keep references, not just ids: replacement/removal must not permit id
         # reuse to turn a previously existing row into a "fresh" replay.
         before = tuple(compressed) if isinstance(compressed, list) else None
         source_uid = inflight.get("message_uid") if isinstance(inflight, dict) else None
-        result = original(compressed, inflight)
+        result = original(*args, **kwargs)
         if (
             before is None
             or not before
             or not isinstance(inflight, dict)
             or inflight.get("role") != "user"
-            or result is not compressed
+            or not isinstance(result, list)
             or len(result) != len(before) + 1
             or any(current is not prior for current, prior in zip(result, before, strict=False))
         ):
@@ -172,5 +241,6 @@ def install_compaction_replay_provenance(compressor: object) -> bool:
         compressor._reappend_inflight_user_task = reappend_with_provenance
     except (AttributeError, TypeError):
         # Older/slot-only compressors can lack a writable per-instance hook.
+        _diagnose_once("read_only_hook")
         return False
     return True

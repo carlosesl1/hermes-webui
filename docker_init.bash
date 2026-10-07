@@ -532,7 +532,7 @@ fi
 ensure_hindsight_client_docker_dependency
 
 echo ""; echo "== Running hermes-webui"
-cd /app; python server.py || error_exit "hermes-webui failed or exited with an error"
+cd /app; python webui_runtime.py || error_exit "hermes-webui failed or exited with an error"
 
 # we should never be here because the server should be running indefinitely, but if we are, we exit safely
 ok_exit "Clean exit"

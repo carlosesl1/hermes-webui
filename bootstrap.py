@@ -586,7 +586,7 @@ def main() -> int:
 
     # Let operators move fallback relative writes out of a read-only agent dir.
     server_cwd = os.environ.get("HERMES_WEBUI_SERVER_CWD", "").strip() or str(agent_dir or REPO_ROOT)
-    server_path = str(REPO_ROOT / "server.py")
+    server_path = str(REPO_ROOT / "webui_runtime.py")
     # Scheme the server will advertise (HTTPS when TLS cert+key are configured).
     scheme = "https" if _tls_probe_enabled() else "http"
 

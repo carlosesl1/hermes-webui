@@ -584,12 +584,17 @@ class TestDoneEventSmd:
         after pagination/windowing because those anchors may not line up with
         the active message array.
         """
-        fn = self.get_fn()
-        assert fn, "'done' handler not found"
-        done_before_render = fn[:fn.index("renderMessages({preserveScroll:true})")]
-        assert "const hasMessageToolMetadata=S.messages.some" in done_before_render
-        assert "!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length" in done_before_render
-        assert "S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map" in done_before_render
+        import shutil
+        import subprocess
+        from pathlib import Path
+
+        node = shutil.which("node")
+        assert node, "node not on PATH"
+        result = subprocess.run(
+            [node, str(Path(__file__).with_name("ci_behavior.cjs")), "metadata"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 # ── 7. apperror event: smd parser ends cleanly ───────────────────────────────

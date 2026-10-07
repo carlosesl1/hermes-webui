@@ -78,7 +78,7 @@ def test_reported_pytest_argv_restarts_canonical_server(monkeypatch):
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     events = _run_restart(monkeypatch, argv=fixture["launch"]["argv_shape"])
     spawn = next(event for event in events if event[0] == "spawn")
-    assert spawn[1] == [r"C:\Python\python.exe", str(REPO / "server.py")]
+    assert spawn[1] == [r"C:\Python\python.exe", str(REPO / "webui_runtime.py")]
     assert not any("pytest" in token.lower() for token in spawn[1])
     assert events[-1] == ("exit", 0)
 
@@ -91,7 +91,7 @@ def test_reported_pytest_argv_restarts_canonical_server(monkeypatch):
 ])
 def test_source_restart_always_targets_server(monkeypatch, argv):
     events = _run_restart(monkeypatch, argv=argv)
-    assert next(event for event in events if event[0] == "spawn")[1] == [r"C:\Python\python.exe", str(REPO / "server.py")]
+    assert next(event for event in events if event[0] == "spawn")[1] == [r"C:\Python\python.exe", str(REPO / "webui_runtime.py")]
 
 
 def test_frozen_restart_preserves_argv(monkeypatch):
