@@ -75,6 +75,7 @@ if(heightStart !== -1 && heightEnd !== -1) eval(src.slice(heightStart, heightEnd
 if(src.indexOf('function _isProcessWakeupMessage') !== -1) eval(extractFunc('_isProcessWakeupMessage'));
 eval(extractFunc('_stripWorkspaceDisplayPrefix'));
 eval(extractFunc('_stripAttachedFilesMarkerForDisplay'));
+eval(extractFunc('_isCompactionReplayMessage'));
 eval(extractFunc('_messageIsRenderable'));
 eval(extractFunc('_getVisibleMessagesWithIdx'));
 eval(extractFunc('_messageVirtualRoleForEntry'));
@@ -128,6 +129,8 @@ process.stdout.write(JSON.stringify({
   virtualRole,
   virtualHeight,
   attachmentOnlyRenderable: _messageIsRenderable(attachmentOnlyWakeup),
+  replayRenderable: _messageIsRenderable({role:'user', content:'replayed context', display_metadata:{webui_compaction_replay:{version:1}}}),
+  ordinaryUserRenderable: _messageIsRenderable({role:'user', content:'normal user prompt'}),
   strippedWakeupDisplay: _stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(markerWakeupContent)),
 }));
 """
@@ -173,6 +176,8 @@ def test_attachment_only_process_wakeup_is_visible_and_display_markers_are_strip
     result = _run_driver()
 
     assert result["attachmentOnlyRenderable"] is True
+    assert result["replayRenderable"] is False
+    assert result["ordinaryUserRenderable"] is True
     assert result["strippedWakeupDisplay"] == "Visible wakeup text"
 
 

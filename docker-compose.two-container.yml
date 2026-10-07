@@ -90,7 +90,9 @@ services:
       - hermes-net
 
   hermes-webui:
-    image: ghcr.io/nesquena/hermes-webui:latest
+    build: .
+    image: hermes-webui:local
+    pull_policy: build
     container_name: hermes-webui
     depends_on:
       - hermes-agent

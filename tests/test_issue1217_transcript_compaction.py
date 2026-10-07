@@ -785,11 +785,24 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
         {"role": "assistant", "content": "short answer"},
     ]
 
+    class FakeCompressor:
+        def _reappend_inflight_user_task(self, compressed, inflight):
+            return compressed + [dict(inflight)]
+
     class FakeAgent:
         def __init__(self, **_kwargs):
-            pass
+            self.context_compressor = FakeCompressor()
 
         def run_conversation(self, **_kwargs):
+            # Exercise the real synchronous route's installation, not a mock of
+            # the hook: producer provenance must exist before the first run.
+            from api.compaction_provenance import is_compaction_replay
+            task = {"role": "user", "content": "synthetic task", "message_uid": "sync-task"}
+            marked = self.context_compressor._reappend_inflight_user_task(
+                [{"role": "assistant", "content": "summary"}], task,
+            )
+            assert is_compaction_replay(marked[-1])
+            assert "display_kind" not in marked[-1] and "display_metadata" not in task
             return {
                 "messages": replayed_result,
                 "final_response": "short answer",

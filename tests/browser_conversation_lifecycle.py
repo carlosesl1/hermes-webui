@@ -268,7 +268,7 @@ def _start_webui_server(repo_root: Path, env: dict, artifact_dir: Path):
         log_path = artifact_dir / f"server{suffix}.log"
         log = log_path.open("w", encoding="utf-8")
         proc = subprocess.Popen(
-            [sys.executable, str(repo_root / "server.py")],
+            [sys.executable, str(repo_root / "webui_runtime.py")],
             cwd=repo_root,
             env=run_env,
             stdout=log,

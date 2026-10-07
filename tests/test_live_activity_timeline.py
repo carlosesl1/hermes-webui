@@ -145,13 +145,12 @@ def test_done_handler_preserves_live_tool_burst_metadata_for_settled_render():
 
 
 def test_message_tool_metadata_path_keeps_live_burst_metadata_available():
-    assert "S._settledLiveToolMetadata=S.toolCalls.map" in MESSAGES_JS
-    assert "S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map" in MESSAGES_JS
-    render_fn = UI_JS.split("const derived=[];", 1)[1].split("if(derived.length) S.toolCalls=derived;", 1)[0]
-    assert "S._settledLiveToolMetadata" in render_fn
-    assert "liveToolMetadata" in render_fn
-    assert "copyLiveToolMetadata" in render_fn
-    assert "activityBurstId" in render_fn
+    assert NODE, "node not on PATH"
+    result = subprocess.run(
+        [NODE, str(REPO / "tests" / "ci_behavior.cjs"), "metadata"],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_message_tool_metadata_empty_assistant_tools_reuse_previous_visible_anchor():

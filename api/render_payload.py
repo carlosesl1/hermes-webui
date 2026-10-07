@@ -12,6 +12,42 @@ SETTLEMENT_ROWS = 30
 FIELD_CHARS = 8192
 ROW_CHARS = 32768
 PAGE_CHARS = 262144
+OPAQUE_CHARS = 65536
+MANUAL_COMPRESS_CHARS = 2 * 1024 * 1024
+# Omit giant opaque data, never collapse distinct occurrence/group identifiers.
+OPAQUE_DATA_KEYS = frozenset({'url', 'data', 'base64', 'b64_json'})
+
+
+def manual_compress_char_limit():
+    """Operator admission policy; invalid/nonpositive values keep the safe default."""
+    import os
+    try:
+        value = int(os.environ.get('HERMES_WEBUI_COMPRESS_MAX_CHARS', ''))
+        return value if value > 0 else MANUAL_COMPRESS_CHARS
+    except ValueError:
+        return MANUAL_COMPRESS_CHARS
+
+
+def exceeds_text_budget(value, limit):
+    """Early, allocation-light admission: no copying, serialization or tokenization."""
+    remaining = limit
+    stack = [iter((value,))]
+    while stack:
+        try:
+            item = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
+        if isinstance(item, str):
+            remaining -= len(item)
+            if remaining < 0:
+                return True
+        elif isinstance(item, dict):
+            stack.append(iter(item.values()))
+        elif isinstance(item, (list, tuple)):
+            stack.append(iter(item))
+    return False
+
 # These locate/group rows, content blocks, tool calls and activity scenes. A
 # depleted text budget must never turn an ID, role, status or type into a preview.
 IDENTITY_KEYS = frozenset({
@@ -19,7 +55,7 @@ IDENTITY_KEYS = frozenset({
     'session_id', 'anchor_id', 'turn_id', '_anchor_stream_id', 'status', 'phase',
     'kind', 'schema', 'version', 'source', 'mime_type', 'mimeType',
     'url', 'path', 'file_path', 'filename', 'timestamp', 'created_at',
-    'updated_at', 'data', 'base64', 'b64_json',
+    'updated_at', 'data', 'base64', 'b64_json', 'message_uid',
 })
 TEXT_KEYS = frozenset({
     'content', 'text', 'thinking', 'reasoning', 'reasoning_content',
@@ -94,7 +130,7 @@ def _conversation_text(message):
     return {}
 
 
-def bounded_render_messages(messages, *, page_budget=None, settlement=False):
+def bounded_render_messages(messages, *, page_budget=None, settlement=False, paging_identity=True):
     """Copy render data, reserving fair shares for readable conversation first.
 
     Field, row and shared page budgets count retained data-bearing characters.
@@ -129,12 +165,19 @@ def bounded_render_messages(messages, *, page_budget=None, settlement=False):
             if settlement and key in ('api_content', 'encrypted_content'):
                 return None
             if isinstance(value, str):
+                identity = ((key in IDENTITY_KEYS and key not in OPAQUE_DATA_KEYS)
+                            or key.endswith(('_id', '_uid', '_key')))
+                if identity:
+                    return value
                 if settlement and len(value) > FIELD_CHARS and (
                     key in ('data', 'base64', 'b64_json') or value.startswith('data:')
                 ):
                     clipped[0] = True
                     return '[Inline data available in full transcript]'
-                if key in IDENTITY_KEYS or not text_payload:
+                if key in OPAQUE_DATA_KEYS or not text_payload:
+                    if len(value) > OPAQUE_CHARS:
+                        clipped[0] = True
+                        return ''
                     return value
                 limit = max(0, min(field_limit, remaining[0], budget[0]))
                 kept = min(len(value), limit)
@@ -152,7 +195,7 @@ def bounded_render_messages(messages, *, page_budget=None, settlement=False):
             return value
 
         preview = visit(message)
-        if index == 0 and message.get('role'):
+        if paging_identity and index == 0 and message.get('role'):
             # Page-size/fair-share clipping must not look like history edits.
             preview['_paging_identity'] = _paging_identity(message)
         if clipped[0]:

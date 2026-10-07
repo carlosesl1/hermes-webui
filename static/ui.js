@@ -10289,7 +10289,7 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}&render_preview=1`);
     S.session = data.session;
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.messages = data.session.messages || [];
@@ -10317,7 +10317,7 @@ function _formatUpdateTargetStatus(label,info){
 }
 function _formatManualUpdateInstruction(info){
   if(!(info&&info.no_git&&info.manual_update&&info.behind>0)) return null;
-  return t('settings_update_manual_docker','docker pull ghcr.io/nesquena/hermes-webui:latest');
+  return t('settings_update_manual_docker','docker compose build --pull hermes-webui');
 }
 function _formatUpdateCheckError(label,info){
   if(!info||!info.error) return null;

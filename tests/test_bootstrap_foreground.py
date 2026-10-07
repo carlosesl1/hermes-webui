@@ -300,7 +300,7 @@ class TestMainForegroundRouting:
         assert path == python_exe
         # argv[0] is the program name (convention), argv[1] is the script
         assert argv[0] == python_exe
-        assert argv[1].endswith("server.py")
+        assert argv[1].endswith("webui_runtime.py")
 
     @pytest.mark.parametrize("var", [
         "INVOCATION_ID",
@@ -567,7 +567,7 @@ def test_package_python_discovers_agent_before_skip_install_gate(import_bootstra
     with patch.object(bs, "install_hermes_agent") as mock_install, patch.object(bs.venv, "EnvBuilder") as mock_builder, pytest.raises(SystemExit):
         bs.main()
 
-    assert execv_calls == [(python_exe, [python_exe, str(bs.REPO_ROOT / "server.py")])]
+    assert execv_calls == [(python_exe, [python_exe, str(bs.REPO_ROOT / "webui_runtime.py")])]
     assert os.environ["HERMES_WEBUI_AGENT_DIR"] == str(agent_dir.resolve())
     mock_install.assert_not_called()
     mock_builder.assert_not_called()

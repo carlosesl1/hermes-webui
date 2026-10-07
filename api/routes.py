@@ -12917,6 +12917,12 @@ def _handle_session_get(handler, parsed) -> bool:
     # clamping live in _parse_msg_limit so the expression has direct test
     # coverage; None means the bare no-msg_limit path (full transcript).
     msg_limit = _parse_msg_limit(query.get("msg_limit", [None])[0])
+    # Full row coverage is independent from content previews. Legacy bare GETs
+    # remain lossless; only explicit render requests opt into clipping.
+    content_full = query.get("content_full", ["0"])[0] == "1"
+    render_preview = query.get("render_preview", ["0"])[0] == "1"
+    if content_full:
+        msg_limit = None
     # ?msg_before=N — 0-based index into the full message array.
     # Returns messages before this index (for scroll-to-top lazy loading).
     # Combined with msg_limit for paging.
@@ -12924,6 +12930,8 @@ def _handle_session_get(handler, parsed) -> bool:
     try:
         msg_before = int(_msg_before) if _msg_before else None
     except (ValueError, TypeError):
+        msg_before = None
+    if content_full:
         msg_before = None
     # ?expand_renderable=1 is retained for compatibility with older
     # frontends. msg_limit now counts visible transcript rows by default, so
@@ -13349,7 +13357,7 @@ def _handle_session_get(handler, parsed) -> bool:
             )
             if revision:
                 raw["regeneration_revision"] = revision
-        if load_messages and msg_limit is not None:
+        if load_messages and not content_full and (msg_limit is not None or render_preview):
             # Apply AFTER scene hydration and legacy tool-card assembly. Clip
             # before redaction/serialization so those do not scan giant text.
             from api.render_payload import bounded_render_messages, PAGE_CHARS
@@ -13358,7 +13366,7 @@ def _handle_session_get(handler, parsed) -> bool:
             raw["tool_calls"] = bounded_render_messages(raw["tool_calls"], page_budget=budget)
             from urllib.parse import urlencode
             full_url = "/api/session?" + urlencode({
-                "session_id": sid, "messages": 1, "resolve_model": 0,
+                "session_id": sid, "messages": 1, "resolve_model": 0, "content_full": 1,
             })
             raw["_full_content_url"] = full_url
             if msg_before is not None and query.get("msg_boundary", [""])[0] == "1":
@@ -24704,6 +24712,8 @@ def _handle_chat_sync(handler, body):
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
 
+            from api.compaction_provenance import prepare_agent_compaction_provenance
+            prepare_agent_compaction_provenance(agent)
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
@@ -27199,9 +27209,30 @@ def _handle_session_compress(handler, body):
         return bad(handler, "Session is still streaming; wait for the current turn to finish.", 409)
 
     try:
-        from api.streaming import _sanitize_messages_for_api
+        from api.streaming import _sanitize_messages_for_api, _API_SAFE_MSG_KEYS
+        from api.render_payload import exceeds_text_budget, manual_compress_char_limit
+        import api.config as _cfg
 
-        messages = _sanitize_messages_for_api(s.messages)
+        # Admission precedes every deep copy/sanitizer/tokenizer/runtime call.
+        # Only provider-facing fields count, not display attachments/metadata.
+        # Snapshot under the same lock used for the eventual commit.
+        with _cfg._get_session_agent_lock(sid):
+            if getattr(s, "active_stream_id", None):
+                return bad(handler, "Session is still streaming; wait for the current turn to finish.", 409)
+            limit = manual_compress_char_limit()
+            api_fields = [{k: v for k, v in m.items() if k in _API_SAFE_MSG_KEYS}
+                          for m in s.messages if isinstance(m, dict)]
+            if exceeds_text_budget(api_fields, limit):
+                return bad(handler, f"Conversation exceeds the WebUI compression admission limit ({limit} characters). "
+                           "Export the full transcript or start a focused continuation; no history was changed.", 413)
+            original_visible_messages = copy.deepcopy(s.messages)
+            original_stream_state = (
+                getattr(s, "active_stream_id", None),
+                getattr(s, "pending_user_message", None),
+                copy.deepcopy(getattr(s, "pending_attachments", None)),
+                getattr(s, "pending_started_at", None),
+            )
+        messages = _sanitize_messages_for_api(original_visible_messages)
         if len(messages) < 4:
             return bad(handler, "Not enough conversation to compress (need at least 4 messages).")
 
@@ -27317,12 +27348,6 @@ def _handle_session_compress(handler, body):
         # Lock contract: hold for the in-memory mutation only, never across
         # network I/O.
         original_messages = list(messages)
-        original_stream_state = (
-            getattr(s, "active_stream_id", None),
-            getattr(s, "pending_user_message", None),
-            copy.deepcopy(getattr(s, "pending_attachments", None)),
-            getattr(s, "pending_started_at", None),
-        )
         approx_tokens = _estimate_messages_tokens_rough(original_messages)
 
         agent = AIAgent(
@@ -27362,7 +27387,7 @@ def _handle_session_compress(handler, body):
             )
             if current_stream_state != original_stream_state:
                 return bad(handler, "Session stream state changed during compression; please retry.", 409)
-            if _sanitize_messages_for_api(s.messages) != original_messages:
+            if s.messages != original_visible_messages or _sanitize_messages_for_api(s.messages) != original_messages:
                 return bad(handler, "Session was modified during compression; please retry.", 409)
 
             from api.session_ops import _truncation_watermark_for
@@ -27399,10 +27424,26 @@ def _handle_session_compress(handler, body):
             except OSError:
                 pass
 
+        from api.render_payload import bounded_render_messages, PAGE_CHARS
+        from urllib.parse import urlencode
+        # Preserve raw coordinates and all occurrences; only response copies
+        # are clipped, never the canonical transcript or compressed context.
+        budget = [PAGE_CHARS]
+        response_messages = bounded_render_messages(s.messages, page_budget=budget, paging_identity=False)
+        response_tools = bounded_render_messages(s.tool_calls, page_budget=budget, paging_identity=False)
+        full_url = "/api/session?" + urlencode({
+            "session_id": sid, "messages": 1, "resolve_model": 0, "content_full": 1,
+        })
+        for row in response_messages + response_tools:
+            if isinstance(row, dict) and row.get("_content_truncated"):
+                row["_full_content_url"] = full_url
         session_payload = redact_session_data(
             s.compact() | {
-                "messages": s.messages,
-                "tool_calls": s.tool_calls,
+                "messages": response_messages,
+                "tool_calls": response_tools,
+                "_full_content_url": full_url,
+                "_messages_truncated": False,
+                "_messages_offset": 0,
                 "active_stream_id": s.active_stream_id,
                 "pending_user_message": s.pending_user_message,
                 "pending_attachments": s.pending_attachments,

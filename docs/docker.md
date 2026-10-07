@@ -11,26 +11,19 @@ This is the comprehensive Docker reference. For a 5-minute quickstart, see the [
 | **Three-container** | Two-container PLUS the dashboard for monitoring. | `docker-compose.three-container.yml` |
 | **All-in-one image** (community fork — third-party, not maintained by us) | Podman 3.4 / multi-arch / supervisord-style preference. | [sunnysktsang/hermes-suite](https://github.com/sunnysktsang/hermes-suite) — see [#1399](https://github.com/nesquena/hermes-webui/issues/1399) for the original discussion |
 
-### Available Docker tags
+### Fork image identity
 
-The WebUI Docker image is published to `ghcr.io/nesquena/hermes-webui` with these tags:
+All shipped Compose layouts build the WebUI from this checkout. Multi-container
+layouts tag that local build `hermes-webui:local`; they do not pull the upstream
+WebUI image. Use `docker compose -f <layout> up -d --build` after updating to the
+reviewed source revision. Agent/dashboard images remain separate upstream products.
 
-| Tag | Channel | Description |
-|---|---|---|
-| `:latest` | stable | The most recent stable release (from `v*` tags). Suitable for production. |
-| `:experimental` | experimental | The most recent experimental release (from `exp-v*` tags). For early testing; may include breaking changes or unfinished features. Do not run in production. |
-| `:X.Y` / `:X.Y.Z` | stable | Pinned stable releases (e.g., `:1.5`, `:1.5.0`). |
-| `:X.Y` / `:X.Y.Z` | experimental | Pinned experimental releases — same version numbers but pushed from `exp-v*` tags. The `:experimental` floating tag always points at the latest of these. |
-
-To track experimental builds in Docker Compose, use the `:experimental` tag:
-
-```yaml
-services:
-  hermes-webui:
-    image: ghcr.io/nesquena/hermes-webui:experimental
-```
-
-> **Note:** updating between `:experimental` builds requires `docker compose pull` followed by `docker compose up -d` — the floating tag is updated only when a new `exp-v*` release is pushed. Experimental builds are not pushed on every commit to the default branch.
+No prebuilt fork image is assumed available. If choosing registry delivery instead,
+use the source/revision labels and immutable digest from a successful fork build,
+then deliberately override the WebUI service's image/build policy. See
+[distribution and update identity](distribution.md) for full-SHA builds, release
+channels and the distinction between publication and deployment. A branch push
+alone does not update any running instance.
 
 > **Note (v0.14+):** If you use `docker-compose.three-container.yml`, both
 > `hermes-agent` and `hermes-dashboard` initialise from the same image and write
@@ -63,7 +56,7 @@ those tools in a dev-only Dockerfile instead of reintroducing passwordless sudo 
 ## 5-minute quickstart (single container)
 
 ```bash
-git clone https://github.com/nesquena/hermes-webui
+git clone https://github.com/carlosesl1/hermes-webui
 cd hermes-webui
 cp .env.docker.example .env
 # Edit .env if needed (most users can skip this on Linux)
@@ -269,7 +262,7 @@ The three-service pattern uses two containers:
 | Service | Image | Ports |
 |---|---|---|
 | `hermes-agent` | `nousresearch/hermes-agent:latest` | 8642 (gateway), 9119 (dashboard) |
-| `hermes-webui` | `ghcr.io/nesquena/hermes-webui:latest` | 8787 (chat UI) |
+| `hermes-webui` | Local build of this fork (`hermes-webui:local`) | 8787 (chat UI) |
 
 Example compose snippet (save as `docker-compose.three-service.yml` or inline into your own file):
 
@@ -296,7 +289,8 @@ services:
       - hermes-net
 
   hermes-webui:
-    image: ghcr.io/nesquena/hermes-webui:latest
+    build: .  # Save this Compose file at the root of the reviewed fork checkout.
+    image: hermes-webui:local
     container_name: hermes-webui
     depends_on:
       - hermes-agent

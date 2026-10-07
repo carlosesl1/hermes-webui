@@ -8,6 +8,7 @@ at most twice per hour regardless of client count.
 Skips repos that are not git checkouts (e.g. Docker baked images where
 .git does not exist).
 """
+import ast
 import hashlib
 import json
 import logging
@@ -98,7 +99,7 @@ def _windows_restart_command():
         windowless_executable = executable[:-4] + "w.exe"
         if os.path.isfile(windowless_executable):
             executable = windowless_executable
-    return [executable, str(REPO_ROOT / "server.py")]
+    return [executable, str(REPO_ROOT / "webui_runtime.py")]
 # Lock files we previously enumerated for auto-removal in v2. v2.2 no longer
 # removes anything on the server, so the enumerable list is no longer needed;
 # ``_inventory_locks`` reports whatever ``.git/**/*.lock`` files currently exist
@@ -501,8 +502,7 @@ def _detect_webui_version() -> str:
         return out
 
     # Docker / baked-image fallback: api/_version.py written by CI at build time.
-    # Parse with regex rather than exec() — the file holds exactly one assignment
-    # and regex is sufficient; exec() on a build artifact is an unnecessary surface.
+    # Parse rather than exec() — build metadata is data, not executable code.
     version_file = REPO_ROOT / 'api' / '_version.py'
     if version_file.exists():
         try:
@@ -846,8 +846,43 @@ def _is_stable_release_tag(tag):
     return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
 
 
-def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100', *, timeout=3.0):
+def _webui_distribution_source():
+    """Resolve a baked source without executing metadata or guessing another repo.
+
+    Source archives and older fork images without source metadata use this
+    distribution's repository. Explicit malformed/unsupported metadata fails
+    closed; Git checkouts continue to use origin via the existing Git path.
+    """
+    source = 'https://github.com/carlosesl1/hermes-webui'
+    try:
+        tree = ast.parse((REPO_ROOT / 'api' / '_version.py').read_text(encoding='utf-8'))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == '__source__'
+                for target in node.targets
+            ):
+                source = ast.literal_eval(node.value)
+            elif (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                  and node.target.id == '__source__'):
+                source = ast.literal_eval(node.value)
+    except FileNotFoundError:
+        pass
+    except (OSError, SyntaxError, ValueError, TypeError, UnicodeError):
+        return None
+    if not isinstance(source, str) or not re.fullmatch(
+        r'https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*', source
+    ):
+        return None
+    return source
+
+
+def _github_release_tags(url=None, *, timeout=3.0):
     """Return GitHub release tags newest-first, including commit SHAs when available."""
+    if url is None:
+        source = _webui_distribution_source()
+        if source is None:
+            return []
+        url = 'https://api.github.com/repos/' + source.removeprefix('https://github.com/') + '/tags?per_page=100'
     request = urllib.request.Request(
         url,
         headers={
@@ -886,8 +921,13 @@ def _check_webui_published_release_update():
     current_version = str(WEBUI_VERSION or '').strip()
     if not _RELEASE_TAG_RE.fullmatch(current_version):
         return None
+    repo_url = _webui_distribution_source()
+    if repo_url is None:
+        return None
     try:
-        tags = _github_release_tags()
+        tags = _github_release_tags(
+            'https://api.github.com/repos/' + repo_url.removeprefix('https://github.com/') + '/tags?per_page=100'
+        )
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
         return None
     if not tags:
@@ -906,7 +946,6 @@ def _check_webui_published_release_update():
     current = next((item for item in tags if item['name'] == current_version), None) or {}
     current_ref = current.get('sha') or current_version
     latest_ref = latest.get('sha') or latest_version
-    repo_url = 'https://github.com/nesquena/hermes-webui'
     return {
         'name': 'webui',
         'behind': behind,

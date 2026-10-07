@@ -1,5 +1,10 @@
 # Hermes Web UI
 
+This distribution is [carlosesl1/hermes-webui](https://github.com/carlosesl1/hermes-webui),
+a fork of [nesquena/hermes-webui](https://github.com/nesquena/hermes-webui).
+Upstream credits and historical issue links are retained. For source/revision
+identity and image publication, see [fork distribution](docs/distribution.md).
+
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
 Hermes WebUI is a lightweight, dark-themed web app interface in your browser for [Hermes Agent](https://hermes-agent.nousresearch.com/).
@@ -116,7 +121,7 @@ ecosystem. See [docs/why-hermes.md](docs/why-hermes.md) for the full side-by-sid
 Run the repo bootstrap:
 
 ```bash
-git clone https://github.com/nesquena/hermes-webui.git hermes-webui
+git clone https://github.com/carlosesl1/hermes-webui.git hermes-webui
 cd hermes-webui
 python3 bootstrap.py
 ```
@@ -467,7 +472,10 @@ curl http://127.0.0.1:8787/health
 
 ## Docker
 
-**Pre-built images** (amd64 + arm64) are published to GHCR on every release.
+**Build from this checkout** to include this fork's code without depending on a
+published image. Pushing a branch does not publish an image. The release workflow
+can publish amd64 + arm64 images on release tags or manual dispatch, but this
+document does not assert that any fork image/tag already exists.
 
 For a comprehensive setup guide covering all 3 compose files, common failure modes, and bind-mount migration, see [`docs/docker.md`](docs/docker.md). The README covers the 5-minute happy path.
 
@@ -476,7 +484,7 @@ For a comprehensive setup guide covering all 3 compose files, common failure mod
 The simplest setup: one WebUI container that runs the agent in-process.
 
 ```bash
-git clone https://github.com/nesquena/hermes-webui
+git clone https://github.com/carlosesl1/hermes-webui
 cd hermes-webui
 cp .env.docker.example .env
 # Edit .env if your host UID isn't 1000 (e.g. macOS where UIDs start at 501)
@@ -495,30 +503,42 @@ echo "HERMES_WEBUI_PASSWORD=change-me-to-something-strong" >> .env
 docker compose up -d --force-recreate
 ```
 
-### Manual `docker run` (no compose)
+### Manual `docker run` (published image, only after verifying availability)
+
+Use the digest reported by a successful fork workflow run. Do not assume an
+upstream `latest` image contains this fork's changes. Replace the required value
+below with the actual published digest; otherwise use the local build path.
 
 ```bash
-docker pull ghcr.io/nesquena/hermes-webui:latest
+: "${IMAGE_DIGEST:?Set the verified sha256:... digest from the fork workflow}"
+IMAGE="ghcr.io/carlosesl1/hermes-webui@${IMAGE_DIGEST}"
+docker pull "$IMAGE"
 docker run -d \
   -e WANTED_UID=$(id -u) -e WANTED_GID=$(id -g) \
   -v ~/.hermes:/home/hermeswebui/.hermes \
   -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui \
   -v ~/workspace:/workspace \
   -p 127.0.0.1:8787:8787 \
-  ghcr.io/nesquena/hermes-webui:latest
+  "$IMAGE"
 ```
 
 ### Build locally
 
 ```bash
-docker build -t hermes-webui .
+# From a clean checkout at the commit you want to distribute:
+test -z "$(git status --porcelain)" || { printf 'Use a clean checkout.\n'; exit 1; }
+REVISION=$(git rev-parse HEAD)
+IMAGE="ghcr.io/carlosesl1/hermes-webui:sha-${REVISION}"
+docker build --build-arg HERMES_VERSION="$(git describe --tags --always)" \
+  --build-arg HERMES_SOURCE=https://github.com/carlosesl1/hermes-webui \
+  --build-arg HERMES_REVISION="$REVISION" -t "$IMAGE" .
 docker run -d \
   -e WANTED_UID=$(id -u) -e WANTED_GID=$(id -g) \
   -v ~/.hermes:/home/hermeswebui/.hermes \
   -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui \
   -v ~/workspace:/workspace \
   -p 127.0.0.1:8787:8787 \
-  hermes-webui
+  "$IMAGE"
 ```
 
 ### Multi-container setups
