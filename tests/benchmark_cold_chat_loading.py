@@ -28,11 +28,13 @@ def main():
     parser.add_argument('--trials', type=int, default=5)
     parser.add_argument('--rows', type=int, default=3000)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--tool-history', action='store_true', help='Tool-heavy rows with occurrence/provider metadata')
+    parser.add_argument('--active-tail', type=int, default=0, help='Archive older SQLite rows (0 keeps all active)')
     parser.add_argument('--handler-allocations', action='store_true',
                         help='Trace complete GET allocations separately; timings include tracing overhead')
     args = parser.parse_args()
-    if not 1 <= args.trials <= 10 or not 100 <= args.rows <= 10000:
-        parser.error('trials must be 1..10; rows must be 100..10000')
+    if not 1 <= args.trials <= 10 or not 100 <= args.rows <= 20000 or not 0 <= args.active_tail <= args.rows:
+        parser.error('trials must be 1..10; rows 100..20000; active-tail 0..rows')
     with tempfile.TemporaryDirectory(prefix='cold-chat-bench-') as directory:
         trial = Path(directory)
         for key, sub in [('HOME', 'home'), ('HERMES_HOME', 'hermes'), ('HERMES_BASE_HOME', 'hermes'),
@@ -50,6 +52,16 @@ def main():
         rows = [{'role': 'user' if i % 2 == 0 else 'assistant',
                  'content': f'Message {i}: ' + 'payload ' * 1024,
                  'timestamp': 1700000000 + i} for i in range(args.rows)]
+        if args.tool_history:
+            for i, row in enumerate(rows):
+                row['message_uid'] = f'occurrence-{i}'
+                row['role'] = 'user' if i % 30 == 0 else ('assistant' if i % 3 == 0 else 'tool')
+                if row['role'] == 'assistant':
+                    row['tool_calls'] = [{'id': f'call-{i}', 'function': {'name': 'terminal', 'arguments': 'payload ' * 512}}]
+                    row['api_content'] = f'provider text {i}'
+                elif row['role'] == 'tool':
+                    row['tool_call_id'] = f'call-{i - i % 3}'
+                    row['tool_name'] = 'terminal'
         session = models.Session(session_id='cold-benchmark', title='Synthetic cold load',
                                  workspace='/synthetic', created_at=1700000000, updated_at=1700000000 + args.rows,
                                  messages=rows, context_messages=rows[-1000:],
@@ -62,19 +74,25 @@ def main():
                 CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT, model TEXT, source TEXT,
                     started_at REAL, last_activity_at REAL, message_count INTEGER);
                 CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, role TEXT,
-                    content TEXT, timestamp REAL, active INTEGER, tool_calls TEXT);
+                    content TEXT, timestamp REAL, active INTEGER, tool_calls TEXT, message_uid TEXT, api_content TEXT, tool_call_id TEXT, tool_name TEXT);
                 CREATE INDEX session_order ON messages(session_id, id);
                 CREATE INDEX session_timestamp ON messages(session_id, timestamp);
+                CREATE INDEX session_active ON messages(session_id, active, timestamp);
             ''')
             conn.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?,?)',
                          (session.session_id, session.title, session.model, 'webui',
                           session.created_at, session.updated_at, len(rows)))
-            conn.executemany('INSERT INTO messages(session_id,role,content,timestamp,active) VALUES(?,?,?,?,1)',
-                             [(session.session_id, r['role'], r['content'], r['timestamp']) for r in rows])
+            conn.executemany('INSERT INTO messages(session_id,role,content,timestamp,active,tool_calls,message_uid,api_content,tool_call_id,tool_name) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                             [(session.session_id, r['role'], r['content'], r['timestamp'],
+                               int(not args.active_tail or i >= len(rows) - args.active_tail),
+                               json.dumps(r['tool_calls']) if r.get('tool_calls') else None,
+                               r.get('message_uid'), r.get('api_content'), r.get('tool_call_id'), r.get('tool_name'))
+                              for i, r in enumerate(rows)])
         sid = session.session_id
         original_first_content = rows[0]['content']
         del rows, session
         results = {'rows': args.rows, 'sidecar_bytes': path.stat().st_size, 'trials': args.trials,
+                   'tool_history': args.tool_history, 'active_tail': args.active_tail,
                    'repo': str(args.repo.resolve()), 'canonical_sha256': canonical_digest, 'cases': {}}
 
         def cold():
@@ -121,7 +139,7 @@ def main():
                 query += f'&msg_before={before}&msg_boundary=1'
             routes.handle_get(SimpleNamespace(_safe_webui_print=lambda *_: None), urlparse(query))
             data = capture.pop('data')['session']
-            assert len(data['messages']) == 30
+            assert len(data['messages']) >= 30 if args.tool_history else len(data['messages']) == 30
             return {key: data.get(key) for key in ['messages', 'tool_calls', 'message_count',
                                                    '_messages_offset', '_messages_truncated', 'todo_state']}
 

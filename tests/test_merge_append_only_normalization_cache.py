@@ -82,15 +82,13 @@ def test_merge_append_only_caches_canonical_keys_and_preserves_identity(monkeypa
         id(repeated_user): 1,
         id(repeated_assistant): 1,
     }
-    assert len(dict(call_counts["dedup"])) == 2
+    assert dict(call_counts["dedup"]) == {}  # derived from merge key
     assert len(dict(call_counts["content"])) == 2
-    assert len(dict(call_counts["visible"])) == 2
-    assert set(dict(call_counts["dedup"]).values()) == {1}
+    assert dict(call_counts["visible"]) == {}  # derived from content/tool keys
     # Source-aware reconciliation deliberately computes content/visible keys
     # once for sidecar ownership and once for state.db ownership. Reusing one
     # cached key here would reintroduce the literal-workspace-prefix collision.
     assert set(dict(call_counts["content"]).values()) == {2}
-    assert set(dict(call_counts["visible"]).values()) == {2}
 
 
 def test_merge_append_only_helpers_do_not_see_mutated_content(monkeypatch):
@@ -161,10 +159,8 @@ def test_merge_append_only_state_only_stable_id_does_not_stringify_content(monke
     assert merged == [message]
     assert merged[0] is message
     assert str_calls["count"] == 0
-    assert dict(call_counts["merge"]) == {}
-    assert dict(call_counts["dedup"]) == {
-        id(message): 1,
-    }
+    assert dict(call_counts["merge"]) == {id(message): 1}
+    assert dict(call_counts["dedup"]) == {}
     assert dict(call_counts["content"]) == {}
     assert dict(call_counts["visible"]) == {}
 
@@ -187,11 +183,8 @@ def test_merge_append_only_distinct_equal_dicts_remain_distinct_inputs(monkeypat
 
     assert merged == [msg_1]
     assert merged[0] is msg_1
-    assert dict(call_counts["dedup"]) == {
-        id(msg_1): 1,
-        id(msg_2): 1,
-    }
-    assert dict(call_counts["merge"]) == {}
+    assert dict(call_counts["dedup"]) == {}
+    assert dict(call_counts["merge"]) == {id(msg_1): 1, id(msg_2): 1}
 
 
 def test_merge_append_only_recomputes_after_mutation(monkeypatch):
@@ -212,9 +205,7 @@ def test_merge_append_only_recomputes_after_mutation(monkeypatch):
     assert second == [state_message]
     assert first is not second
     assert str_calls["count"] == 2
-    assert dict(call_counts["dedup"]) == {
-        id(state_message): 2,
-    }
-    assert dict(call_counts["merge"]) == {}
+    assert dict(call_counts["dedup"]) == {}
+    assert dict(call_counts["merge"]) == {id(state_message): 2}
     assert dict(call_counts["content"]) == {}
     assert dict(call_counts["visible"]) == {}

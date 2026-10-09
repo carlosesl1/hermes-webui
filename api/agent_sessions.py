@@ -61,6 +61,29 @@ def message_stats_table(conn, *, has_timestamp: bool) -> str:
     identifiers (not interpolated as raw SQL).
     """
     required = {'session_id', 'timestamp'} if has_timestamp else {'session_id'}
+    return _message_index_table(conn, required)
+
+
+def active_message_table(conn) -> str:
+    """Keep active-row rejection on an existing index, before payload reads.
+
+    Use only when the caller applies ``active IS NULL OR active != 0``. SQLite
+    may otherwise prefer (session_id, id) for append ordering and visit every
+    archived payload to read its active flag. A complete session-leading index
+    containing active and timestamp evaluates both activity and timestamp floors
+    without touching rejected payloads. The caller retains its exact predicates,
+    ordering, cap and projection; NULL and every nonzero active value survive.
+
+    This is a schema-only hint, not ID preselection: it preserves one query's
+    snapshot/revision. Callers need a stable ID ordering before applying it;
+    legacy timestamp-only ties must retain the original planner. Unknown schemas
+    retain the unhinted table. No writes, new indexes, statistics or caches.
+    """
+    return _message_index_table(conn, {'session_id', 'active', 'timestamp'})
+
+
+def _message_index_table(conn, required: set[str]) -> str:
+    """Select a complete binary session-leading index from the current schema."""
     try:
         cur = conn.cursor()
         cur.execute('PRAGMA index_list(messages)')

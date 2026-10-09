@@ -307,6 +307,49 @@ duplicate settlement, real-server deterministic lifecycle, and temporary real-co
 compaction/flush gates also passed. No live model call or production restart was
 used to validate this follow-up; deployed latency needs a separate release check.
 
+## Residual read work: archived rows and tool-heavy history
+
+Active-message reads now prefer an existing complete binary, session-leading index
+containing `active` and `timestamp`, when the table also has a durable `id` for
+ordering. This tests inactive flags before reading large archived payload pages.
+It creates no index, writes no SQLite statistics, and changes neither activity
+semantics (NULL and all nonzero values remain valid), timestamp floors, caps nor
+revision snapshots. Missing/partial/expression/non-binary indexes and legacy
+no-ID tables retain the old query. The latter matters: changing an index can change
+equal-timestamp tie order and which legacy row survives a cap.
+
+Reconciliation derives duplicate/visible keys from already computed pure keys
+instead of repeatedly serializing tool calls. Structured content is still
+stringified once per row; occurrence checks remain independent. Empty state reads
+return before building history keys, and provider-sidecar reconciliation stops
+when every source has been matched or quarantined. No new persistent cache, TTL,
+content-only deduplication, repair, or model-context transformation is introduced.
+
+With compatible core helpers, the profile signature walk now honors the core's
+active-organization marker instead of traversing every inactive mirror. Marker and
+parent stats preserve switch/deletion invalidation, symlinks are retained, and
+older cores keep the original walk. This addresses wasted traversal; it does not
+establish the cause of every slow profile request or eliminate host contention.
+
+Reproduce with the SAME benchmark script/interpreter against both checkouts:
+
+```sh
+python tests/benchmark_cold_chat_loading.py --repo /path/to/checkout \
+  --rows 6000 --active-tail 300 --tool-history --trials 3 --output result.json
+./scripts/test.sh tests/test_reconciliation_work_budget.py \
+  tests/test_active_message_read_plan.py tests/test_profile_probe_cost.py
+# Optional source-only helper parity, without booting/importing the core:
+PROFILE_PROBE_CORE_SOURCE=/path/to/hermes-agent/agent/skill_utils.py \
+  ./scripts/test.sh tests/test_profile_probe_cost.py
+```
+
+The tool-heavy fixture is synthetic (~67.7 MB), with 6,000 visible-history rows
+and only the final 300 active in SQLite. Compare returned payload digests and
+canonical-file identity as well as wall/CPU time; page caches and host contention
+are not controlled. An archived prefix edit is intentionally invisible to active
+reads. Full native sidecar decoding and linear history work still remain. Isolated
+browser checks do not substitute for post-deployment measurements.
+
 ## Reproduction and verification
 
 Use the supported repository runner with isolated HOME/Hermes/WebUI state:
