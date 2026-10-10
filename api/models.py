@@ -42,6 +42,7 @@ from api.agent_sessions import (
     is_cli_session_row,
     normalize_agent_session_source,
     message_stats_table,
+    active_message_table,
     open_state_db_readonly,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
@@ -8545,6 +8546,9 @@ def get_state_db_session_messages(
             active_clause = ""
             if 'active' in available and not include_inactive:
                 active_clause = " AND (active IS NULL OR active != 0)"
+            # Legacy tables order only by timestamp; changing indexes can change
+            # equal-timestamp tie order (including which row survives LIMIT).
+            message_table = active_message_table(conn) if active_clause and id_col else "messages"
             durable_order_column = 'id' if 'id' in available else 'timestamp'
             # Defensive row cap (backstop only — see docstring). Applied as a
             # SQL LIMIT bound parameter (?) so the tail (newest) rows are
@@ -8565,7 +8569,7 @@ def get_state_db_session_messages(
                 cur.execute(f"""
                     SELECT * FROM (
                         SELECT {', '.join(selected)}, session_id
-                        FROM messages
+                        FROM {message_table}
                         WHERE session_id IN ({placeholders})
                         {since_clause}
                         {active_clause}
@@ -8575,7 +8579,7 @@ def get_state_db_session_messages(
             else:
                 cur.execute(f"""
                     SELECT {', '.join(selected)}, session_id
-                    FROM messages
+                    FROM {message_table}
                     WHERE session_id IN ({placeholders})
                     {since_clause}
                     {active_clause}
@@ -9519,6 +9523,9 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
         if not row_id_valid or not timestamp_valid or not stable_id_valid:
             used_sources.add(source_index)
 
+    if len(used_sources) == len(state):
+        return
+
     # 1. Stable message identity. This is the strongest WebUI-side identity
     # and must run before timestamp/content fallbacks. Duplicate or conflicting
     # aliases are consumed above and cannot fall through to a guess.
@@ -9586,6 +9593,9 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
         ):
             continue
         _attach(sidecar[target_index], state[source_index])
+
+    if len(used_sources) == len(state):
+        return
 
     # 2. Durable row identity. This path is unambiguous only when every
     # alias agrees, each row id occurs once on each side, and visible content
@@ -9669,6 +9679,9 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
         index for index in duplicate_stable_source_indexes if index not in used_sources
     )
 
+    if len(used_sources) == len(state):
+        return
+
     # 3. Exact role + timestamp. Equal timestamps are not provenance; resolve
     # only mutually-unique compatible pairs inside a bucket and never guess by
     # list order when a relationship is ambiguous.
@@ -9736,6 +9749,9 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
             used_sources.add(source_index)
             used_targets.add(target_index)
             _attach(sidecar[target_index], state[source_index])
+
+    if len(used_sources) == len(state):
+        return
 
     # 4. Same-second sub-second drift. The sidecar JSON and state.db can
     # record one logical turn with different fractional timestamps while still
@@ -9812,6 +9828,9 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
             used_sources.add(source_index)
             used_targets.add(target_index)
             _attach(sidecar[target_index], state[source_index])
+
+    if len(used_sources) == len(state):
+        return
 
     # 5. Role + visible-content fallback tolerates mixed timestamp metadata,
     # but only when the candidate relationship is mutually unique. Repeated
@@ -10404,6 +10423,8 @@ def merge_session_messages_append_only(
     """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
+    if not state_messages:
+        return sidecar_messages
     reconciled_targets = {}
     _reconcile_api_content_sidecars(sidecar_messages, state_messages, matches=reconciled_targets)
     # The reconciler's quarantine sets are invocation-local. Mirror the
@@ -10449,8 +10470,8 @@ def merge_session_messages_append_only(
     # are retained for this call, and this function does not mutate key-defining
     # fields before each helper call.
     _MESSAGE_CACHE_MISSING = object()
-    _cached_msg_prepared: dict[int, dict[str, object]] = {}
     _cached_msg_keys: dict[tuple[int, str], object] = {}
+    _cached_msg_prepared: dict[int, dict] = {}
     _comparison_content_cache = _comparison_cache if _comparison_cache is not None else {}
     ambiguous_timestamp_keys = set()
 
@@ -10478,57 +10499,48 @@ def merge_session_messages_append_only(
     def _cached_message_key(msg, kind):
         if not isinstance(msg, dict):
             return _message_key_helpers[kind](msg)
-
         cache_key = (id(msg), kind)
         value = _cached_msg_keys.get(cache_key, _MESSAGE_CACHE_MISSING)
         if value is not _MESSAGE_CACHE_MISSING:
             return value
 
-        helper = _message_key_helpers[kind]
-        msg_cache_key = id(msg)
-        prepared_msg = _cached_msg_prepared.get(msg_cache_key)
-
-        if kind in {"merge", "dedup"}:
-            if prepared_msg is None:
-                value = helper(msg)
-                # If this is a legacy message key, keep the already-stringified
-                # content payload for downstream helper calls.
-                if isinstance(value, tuple) and value and value[0] == "legacy":
-                    prepared_msg = dict(msg)
-                    prepared_msg["content"] = value[2]
-                    _cached_msg_prepared[msg_cache_key] = prepared_msg
-            else:
-                value = helper(prepared_msg)
-            if kind == "dedup":
-                occurrence = _message_occurrence_key(msg)
-                # Exact timestamped legacy copies can be replay duplicates;
-                # unidentified rows without timestamps remain distinct.
-                timestamp, valid = _message_exact_timestamp_details(msg)
-                if occurrence[0] == 'unidentified' and valid and timestamp is not None:
-                    timestamp_key = ((_cached_message_key(msg, "merge"), str(msg.get("timestamp")))
-                                     if ambiguous_timestamp_keys else None)
-                    if timestamp_key not in ambiguous_timestamp_keys:
-                        occurrence = ('legacy-timestamp', msg.get('_source'), msg.get('_active_turn_token'))
-                value = (value, occurrence)
-            _cached_msg_keys[cache_key] = value
-            return value
-
-        if prepared_msg is None:
-            # For non-ID messages this is the canonical merge path.
+        if kind == "dedup":
+            # Pure key derivation: the legacy helpers differ ONLY in their
+            # timestamp slot. Reuse serialized tool calls and exact provider
+            # bytes; never reuse the occurrence decision from another row.
             merge_key = _cached_message_key(msg, "merge")
-            prepared_msg = _cached_msg_prepared.get(msg_cache_key)
-            if prepared_msg is None:
-                prepared_msg = dict(msg)
-                prepared_msg["content"] = (
-                    merge_key[2]
-                    if isinstance(merge_key, tuple)
-                    and len(merge_key) > 2
-                    and merge_key[0] == "legacy"
-                    else str(msg.get("content") or "")
-                )
-                _cached_msg_prepared[msg_cache_key] = prepared_msg
-
-        value = helper(prepared_msg)
+            value = ((*merge_key[:3], str(msg.get("timestamp") or ""), *merge_key[4:])
+                     if merge_key[0] == "legacy" else merge_key)
+            occurrence = _message_occurrence_key(msg)
+            timestamp, valid = _message_exact_timestamp_details(msg)
+            if occurrence[0] == 'unidentified' and valid and timestamp is not None:
+                timestamp_key = ((merge_key, str(msg.get("timestamp")))
+                                 if ambiguous_timestamp_keys else None)
+                if timestamp_key not in ambiguous_timestamp_keys:
+                    occurrence = ('legacy-timestamp', msg.get('_source'), msg.get('_active_turn_token'))
+            value = (value, occurrence)
+        elif kind in {"visible_sidecar", "visible_state"}:
+            # content and visible keys share role/content/provider bytes.
+            # They differ in tool identity: keep the exact visible-key shape.
+            content_key = _cached_message_key(msg, kind.replace("visible_", "content_"))
+            merge_key = _cached_message_key(msg, "merge")
+            if merge_key[0] == "legacy":
+                tool_key = merge_key[6]
+            else:
+                calls = msg.get("tool_calls")
+                tool_key = json.dumps(calls, sort_keys=True, default=str) if calls else ""
+            value = (content_key[0], content_key[1], tool_key, *content_key[4:])
+        else:
+            prepared = _cached_msg_prepared.get(id(msg), msg)
+            if kind.startswith("content_") and prepared is msg and not isinstance(msg.get("content"), str):
+                merge_key = _cached_message_key(msg, "merge")
+                prepared = _cached_msg_prepared.get(id(msg))
+                if prepared is None:
+                    prepared = dict(msg, content=str(msg.get("content") or ""))
+                    _cached_msg_prepared[id(msg)] = prepared
+            value = _message_key_helpers[kind](prepared)
+            if kind == "merge" and value[0] == "legacy" and not isinstance(msg.get("content"), str):
+                _cached_msg_prepared[id(msg)] = dict(msg, content=value[2])
         _cached_msg_keys[cache_key] = value
         return value
 
@@ -10551,8 +10563,6 @@ def merge_session_messages_append_only(
     ambiguous_timestamp_keys.update(key for key, owners in timestamp_owners.items() if len(owners) > 1)
 
     watermark_timestamp = _message_timestamp_as_float({"timestamp": truncation_watermark})
-    if not state_messages:
-        return sidecar_messages
     if not sidecar_messages:
         if watermark_timestamp is None:
             # No watermark — keep everything, just dedup.

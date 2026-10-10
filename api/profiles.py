@@ -1817,6 +1817,28 @@ def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
     except Exception:
         EXCLUDED_SKILL_DIRS = frozenset()
         SKILL_SUPPORT_DIRS = frozenset()
+    # Newer cores gate organization mirrors in their index iterator. Scanning
+    # inactive mirrors here makes even cached reads scale with invisible skills.
+    # Reuse the core's marker semantics; older cores retain the original walk.
+    org_root = None
+    active_org = None
+    try:
+        from agent.skill_utils import (
+            ORG_ACTIVE_MARKER, ORG_MIRROR_DIR_NAME, read_active_org_id,
+        )
+        active_org = read_active_org_id(skills_dir)
+        org_path = skills_dir / ORG_MIRROR_DIR_NAME
+        org_root = str(org_path)
+        # The marker itself was previously omitted from the signature. Include
+        # both it and its parent so switch/edit/deletion remain observable even
+        # when the entire mirror is pruned (including symlinked mirror roots).
+        for path in (org_path, org_path / ORG_ACTIVE_MARKER):
+            try:
+                max_ns = max(max_ns, path.stat().st_mtime_ns)
+            except OSError:
+                pass
+    except (ImportError, AttributeError, OSError):
+        pass
     try:
         # Directory mtimes catch nested out-of-band deletes that leave file mtimes unchanged.
         # followlinks=True mirrors agent.skill_utils.iter_skill_index_files (the compute
@@ -1831,6 +1853,11 @@ def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
             # vendors a dependency tree doesn't make this every-call probe walk
             # thousands of irrelevant files and defeat the cache's perf goal.
             has_skill_md = "SKILL.md" in filenames
+            if org_root is not None:
+                if root == str(skills_dir) and active_org is None:
+                    dirnames[:] = [d for d in dirnames if d != ORG_MIRROR_DIR_NAME]
+                elif root == org_root:
+                    dirnames[:] = [d for d in dirnames if d == active_org]
             dirnames[:] = [
                 d for d in dirnames
                 if d not in EXCLUDED_SKILL_DIRS
