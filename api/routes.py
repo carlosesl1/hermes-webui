@@ -18094,6 +18094,7 @@ def _handle_sessions_search(handler, parsed):
             payload = search_saved_history(
                 sessions, q, qs.get("cursor", [""])[0], SESSION_DIR,
                 _session_search_message_text, _session_search_preview,
+                active_profile=active_profile, all_profiles=all_profiles,
             )
         except ValueError as exc:
             return bad(handler, str(exc), 400)

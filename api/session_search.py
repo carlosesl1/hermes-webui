@@ -15,15 +15,20 @@ PAGE_BYTES = 8 * 1024 * 1024
 PAGE_SECONDS = 2.0
 
 
-def search_saved_history(sessions, query, cursor, directory, text, preview):
+def search_saved_history(sessions, query, cursor, directory, text, preview, *,
+                         active_profile, all_profiles=False):
     if len(query) > 256:
         raise ValueError("Search query is too long")
-    scope = hashlib.sha256(query.encode()).hexdigest()[:16]
+    # Continuations belong to a canonical store AND the effective request scope.
+    # A last-ID from another profile would otherwise skip its earlier sessions.
+    scope_data = ["saved-history-v2", str(directory.resolve()), active_profile,
+                  bool(all_profiles), query]
+    scope = hashlib.sha256(json.dumps(scope_data, ensure_ascii=True).encode()).hexdigest()
     after = ""
     if cursor:
         parts = cursor.split(":", 1)
         if len(parts) != 2 or parts[0] != scope:
-            raise ValueError("Search cursor does not match query")
+            raise ValueError("Search cursor does not match query or scope; restart search")
         after = parts[1]
     rows = sorted((s for s in sessions if str(s.get("session_id", "")) > after),
                   key=lambda s: str(s.get("session_id", "")))

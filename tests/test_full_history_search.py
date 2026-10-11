@@ -1,11 +1,14 @@
 """UX07: real bounded reader + route scope and asynchronous browser helpers."""
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlparse
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,10 +21,11 @@ def _fixture(path, sid="s1", profile="default"):
     return data
 
 
-def _search(path, rows, cursor=""):
+def _search(path, rows, cursor="", profile="default", all_profiles=False):
     from api.session_search import search_saved_history
     from api.routes import _session_search_message_text, _session_search_preview
-    return search_saved_history(rows, "late phrase", cursor, path, _session_search_message_text, _session_search_preview)
+    return search_saved_history(rows, "late phrase", cursor, path, _session_search_message_text, _session_search_preview,
+                                active_profile=profile, all_profiles=all_profiles)
 
 
 def test_phrase_after_fifth_row_and_stable_location(tmp_path):
@@ -77,7 +81,7 @@ let timer; function setTimeout(f){timer=f;return 1;} function clearTimeout(){tim
 function syncSessionSearchClear(){} function _syncArchivedSearchPagingRefresh(){}
 function renderSessionListFromCache(){} function _sessionSearchDirectAndTitleMatches(){return [];}
 const _allSessions=[];
-let _loadSessionGeneration=1;
+let _loadSessionGeneration=1, _profileSwitchGeneration=0;
 """ + state + helpers + "\n(async()=>{" + body + "})().catch(e=>{console.error(e);process.exit(1)});"
     subprocess.run(["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True)
 
@@ -114,3 +118,137 @@ await _openSessionSearchResult(hit);assert.equal(hydrated,1);assert.equal(jumped
 jumped=-1;hit.match_location.text_sha256='changed';await _openSessionSearchResult(hit);
 assert.equal(jumped,-1);assert.equal(toasts,1);
 """)
+
+
+def test_cursor_binds_profile_store_and_scope(tmp_path):
+    from api import session_search
+    rows = [_fixture(tmp_path, "m1"), _fixture(tmp_path, "z1")]
+    other = tmp_path / "other"
+    other.mkdir()
+    foreign = [_fixture(other, "a1", "other")]
+    with patch.object(session_search, "PAGE_SESSIONS", 1):
+        cursor = _search(tmp_path, rows)["next_cursor"]
+        assert _search(tmp_path / ".", rows, cursor)["sessions"][0]["session_id"] == "z1"
+        for directory, profile, all_profiles in [(other, "default", False), (tmp_path, "other", False), (tmp_path, "default", True)]:
+            with pytest.raises(ValueError, match="scope"):
+                _search(directory, foreign, cursor, profile, all_profiles)
+        assert _search(other, foreign, profile="other")["sessions"][0]["session_id"] == "a1"
+
+
+def test_profile_roundtrip_invalidates_pending_and_continuation():
+    _run_js("""
+let resolve,urls=[];
+global.api=(url)=>{urls.push(url);return new Promise(r=>resolve=r)};
+let pending=searchSessionHistory();
+resolve({sessions:[{session_id:'m1'}],active_profile:'default',next_cursor:'page2'});await pending;
+S.activeProfile='other';++_profileSwitchGeneration;
+assert.equal(_syncSessionSearchOwner(),true);
+assert.equal(_contentSearchResults.length,0);assert.equal(_sessionSearchState.cursor,null);
+S.activeProfile='default';++_profileSwitchGeneration;
+pending=searchSessionHistory();assert.equal(new URL(urls.at(-1),'http://local').searchParams.get('cursor'),'');
+S.activeProfile='other';++_profileSwitchGeneration;S.activeProfile='default';++_profileSwitchGeneration;
+resolve({sessions:[{session_id:'old-visit'}],active_profile:'default',next_cursor:'bad'});await pending;
+assert.equal(_contentSearchResults.length,0);
+""")
+
+
+def test_cap_preserves_first_results_until_explicit_restart():
+    _run_js("""
+let calls=0;
+global.api=async()=>({sessions:Array.from({length:24},(_,i)=>({session_id:'s'+(calls*24+i)})),active_profile:'default',next_cursor:'p'+(++calls)});
+for(let i=0;i<10;i++) await searchSessionHistory();
+assert.equal(_contentSearchResults.length,240);assert.equal(_contentSearchResults[0].session_id,'s0');
+assert.equal(_sessionSearchState.status,'capped');assert.equal(_sessionSearchState.cursor,null);
+await searchSessionHistory();assert.equal(calls,10);assert.equal(_contentSearchResults[0].session_id,'s0');
+await searchSessionHistory({restart:true});assert.equal(calls,11);assert.equal(_contentSearchResults.length,24);
+assert.equal(_sessionSearchState.capped,false);
+""")
+
+
+@pytest.mark.parametrize("width,target", [(1440, 17), (522, 181)])
+def test_real_renderer_long_chat_jump_and_stale_match(tmp_path, width, target):
+    """Controlled HTTP boundary; real hydration, virtualizer and scrolling.
+
+    Boot/provider/navigation are not exercised. No renderer or jump stubs.
+    HERMES_TEST_CHROMIUM reuses an installed browser without downloading one.
+    """
+    playwright = pytest.importorskip("playwright.sync_api")
+    messages = [{"role": "assistant" if i % 2 else "user", "content": f"Ordinary row {i} " + "body text " * 12,
+                 "message_uid": f"u{i}"} for i in range(520)]
+    messages[target]["content"] = f"unique late phrase {target}"
+    session = {"session_id": "long", "profile": "default", "title": "Long fixture", "messages": messages,
+               "message_count": len(messages), "tool_calls": []}
+    (tmp_path / "long.json").write_text(json.dumps(session))
+    hit = _search(tmp_path, [session])["sessions"][0]
+    requests, errors = [], []
+    with playwright.sync_playwright() as p:
+        executable = os.environ.get("HERMES_TEST_CHROMIUM")
+        if not executable and not Path(p.chromium.executable_path).exists():
+            pytest.skip("No installed Chromium; set HERMES_TEST_CHROMIUM")
+        browser = p.chromium.launch(executable_path=executable, headless=True, args=["--no-sandbox"])
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+
+        def route_handler(route):
+            url = urlparse(route.request.url)
+            if url.path == "/":
+                html = (ROOT / "static/index.html").read_text().replace("__MAX_UPLOAD_BYTES__", "1000000").replace("__CSRF_TOKEN_JSON__", '"offline-fixture"')
+                route.fulfill(status=200, content_type="text/html", body=html)
+            elif url.path == "/static/boot.js":
+                route.fulfill(status=200, content_type="application/javascript", body="")
+            elif url.path == "/api/session":
+                requests.append(url.query)
+                full = "content_full=1" in url.query
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"session": {
+                    **session, "messages": messages if full else messages[-30:],
+                    "_messages_offset": 0 if full else 490, "_messages_truncated": not full}}))
+            elif url.path.startswith("/api/"):
+                route.fulfill(status=200, content_type="application/json", body="{}")
+            elif url.hostname == "127.0.0.1" and url.path.startswith("/static/"):
+                asset = ROOT / url.path.lstrip("/")
+                if asset.is_file():
+                    route.fulfill(path=str(asset))
+                else:
+                    route.fulfill(status=404, body="")
+            else:
+                route.abort()
+
+        page.route("**/*", route_handler)
+        page.goto("http://127.0.0.1:17899/", wait_until="load")
+        page.evaluate("""() => {
+          window.qaToasts=[];showToast=text=>qaToasts.push(text);
+          window.qaJumps=0;const realJump=jumpToTurnQuestion;
+          jumpToTurnQuestion=async(...args)=>{qaJumps++;return realJump(...args);};
+          _openSidebarSession=async s=>{
+            S.activeProfile='default';S.session=s;S.messages=[];S.busy=false;S.activeStreamId=null;
+            _loadingSessionId=s.session_id;++_loadSessionGeneration;
+            await _ensureMessagesLoaded(s.session_id,{loadGeneration:_loadSessionGeneration});
+            _loadingSessionId=null;renderMessages();window.qaInitialCount=S.messages.length;
+          };
+        }""")
+        page.evaluate("hit=>_openSessionSearchResult(hit)", hit)
+        page.wait_for_function("""target=>{
+          const c=document.getElementById('messages').getBoundingClientRect();
+          return Array.from(document.querySelectorAll('[data-msg-idx="'+target+'"]')).some(n=>{
+            const r=n.getBoundingClientRect();return n.getClientRects().length && r.top>=c.top-1 && r.top<c.bottom && r.bottom>c.top;
+          });
+        }""", arg=target, timeout=10000)
+        outcome = page.evaluate("""() => ({initial:qaInitialCount,ids:S.messages.map(m=>m.message_uid),
+          content:S.messages.map(m=>m.content),toasts:qaToasts,dom:document.querySelectorAll('[data-msg-idx]').length})""")
+        assert outcome["initial"] == 30
+        assert outcome["ids"] == [row["message_uid"] for row in messages]
+        assert outcome["content"] == [row["content"] for row in messages]
+        assert outcome["toasts"] == []
+        assert outcome["dom"] < len(messages)
+        assert any("msg_limit=" in query for query in requests)
+        assert any("content_full=1" in query for query in requests)
+        evidence = os.environ.get("HERMES_SEARCH_EVIDENCE")
+        if evidence:
+            Path(evidence).mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(Path(evidence) / f"search-jump-{width}.png"))
+        # Same UID, edited text: fail closed and do not move to the old occurrence.
+        messages[target]["content"] = "edited since search"
+        page.evaluate("hit=>_openSessionSearchResult(hit)", hit)
+        assert page.evaluate("({toasts:qaToasts.length,jumps:qaJumps})") == {"toasts": 1, "jumps": 1}
+        assert not errors, errors
+        browser.close()
