@@ -509,7 +509,7 @@ def test_cron_form_surfaces_one_shot_warning_copy_markers_and_preset_markup():
     assert ".cron-schedule-preview" in style
     # Time input is themed to match the other form controls (not bare native chrome).
     assert "input[type=\"time\"]" in style
-    assert "cron_schedule_time_hint" in panels
+    assert "cron_effective_timezone" in panels  # effective backend zone, not a guessed local hint
     assert "fields: ['minute']" in panels
     assert "fields: ['time']" in panels
     assert "fields: ['weekday', 'time']" in panels

@@ -54,9 +54,11 @@ def _extract_workspace_block(start_marker: str, end_marker: str) -> str:
 
 
 def _extract_workspace_function(name: str) -> str:
-    marker = f"async function {name}("
+    marker = f"function {name}("
     start = WORKSPACE_JS.find(marker)
     assert start >= 0, f"{name} not found in static/workspace.js"
+    if WORKSPACE_JS[max(0, start - 6):start] == "async ":
+        start -= 6
     params_depth = 0
     body_start = -1
     for idx in range(start, len(WORKSPACE_JS)):
