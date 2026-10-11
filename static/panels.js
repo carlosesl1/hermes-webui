@@ -471,6 +471,7 @@ window.addEventListener('beforeunload', e => {
 });
 
 async function switchPanel(name, opts = {}) {
+  const navigationTicket = typeof navigationBegin === 'function' ? navigationBegin(opts.navigationTicket) : null;
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
   // ── Desktop sidebar collapse toggle (rail-click only) ──
@@ -494,6 +495,7 @@ async function switchPanel(name, opts = {}) {
     }
   }
   if (prevPanel !== nextPanel && !await guardUnsavedEditors()) return false;
+  if (navigationTicket && !navigationCurrent(navigationTicket)) return false;
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
   // Close any long-lived Kanban SSE stream when leaving the kanban panel
@@ -502,6 +504,7 @@ async function switchPanel(name, opts = {}) {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
   _currentPanel = nextPanel;
+  if (typeof navigationChanged === 'function') navigationChanged(navigationTicket);
   // Mobile drawer visibility: a rail/tab click on a phone should surface the
   // panel synchronously, NOT after the panel's async data load. If the re-open
   // stayed at the bottom of this function, a form opened from inside the drawer
@@ -540,10 +543,11 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
   if (nextPanel === 'logs') await loadLogs();
+  if (navigationTicket && !navigationCurrent(navigationTicket)) return false;
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
-    switchSettingsSection(_currentSettingsSection);
+    switchSettingsSection(_currentSettingsSection, {navigationTicket});
     loadSettingsPanel();
   }
   _resyncChatSidebarAfterPanelSwitch();
@@ -1554,8 +1558,10 @@ async function _loadRunContent(jobId, filename, runId){
   }
 }
 
-async function openCronDetail(jobOrId, el, bypassGuard = false) {
+async function openCronDetail(jobOrId, el, bypassGuard = false, routeTicket = null) {
+  const navigationTicket = typeof navigationBegin === 'function' ? navigationBegin(routeTicket) : null;
   if (!bypassGuard && !await guardUnsavedEditors('cron')) return false;
+  if (navigationTicket && !navigationCurrent(navigationTicket)) return false;
   _editorDrafts.delete('cron');
   const job = _findCronJob(jobOrId);
   if (!job) return;
@@ -1573,6 +1579,8 @@ async function openCronDetail(jobOrId, el, bypassGuard = false) {
   _renderCronDetail(job);
   if (!job.read_only) _checkCronWatchOnDetail(job.id, detailKey);
   _closeMobileSidebarAfterPanelSelection();
+  if (typeof navigationChanged === 'function') navigationChanged(navigationTicket);
+  return true;
 }
 
 function _clearCronDetail(){
@@ -5208,8 +5216,10 @@ function _setSkillHeaderButtons(mode) {
 }
 
 let _skillLoadGeneration = 0;
-async function openSkill(name, el, bypassGuard = false) {
+async function openSkill(name, el, bypassGuard = false, routeTicket = null) {
+  const navigationTicket = typeof navigationBegin === 'function' ? navigationBegin(routeTicket) : null;
   if (!bypassGuard && !await guardUnsavedEditors('skill')) return false;
+  if (navigationTicket && !navigationCurrent(navigationTicket)) return false;
   _editorDrafts.delete('skill');
   const generation = ++_skillLoadGeneration;
   // Highlight active skill in the sidebar list
@@ -5219,7 +5229,7 @@ async function openSkill(name, el, bypassGuard = false) {
   _editingSkillName = null;
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
-    if (generation !== _skillLoadGeneration) return false;
+    if (generation !== _skillLoadGeneration || (navigationTicket && !navigationCurrent(navigationTicket))) return false;
     if (data && (data.success === false || data.error)) {
       const message = data.error || t('skill_load_failed');
       _renderSkillError(name, message);
@@ -5229,6 +5239,8 @@ async function openSkill(name, el, bypassGuard = false) {
     _currentSkillDetail = { name, content: data.content || '', linked_files: data.linked_files || {} };
     _renderSkillDetail(name, data.content || '', data.linked_files || {});
     _closeMobileSidebarAfterPanelSelection();
+    if (typeof navigationChanged === 'function') navigationChanged(navigationTicket);
+    return true;
   } catch(e) { setStatus(t('skill_load_failed') + e.message); }
 }
 
@@ -6314,7 +6326,9 @@ function _setWorkspaceHeaderButtons(mode, ws){
   }
 }
 
-function openWorkspaceDetail(path, el){
+function openWorkspaceDetail(path, el, routeTicket = null){
+  const navigationTicket = typeof navigationBegin === 'function' ? navigationBegin(routeTicket) : null;
+  if (navigationTicket && !navigationCurrent(navigationTicket)) return;
   if (!_workspaceList) return;
   const ws = _workspaceList.find(w => w.path === path);
   if (!ws) return;
@@ -6324,6 +6338,7 @@ function openWorkspaceDetail(path, el){
   _workspacePreFormDetail = null;
   _renderWorkspaceDetail(ws);
   _closeMobileSidebarAfterPanelSelection();
+  if (typeof navigationChanged === 'function') navigationChanged(navigationTicket);
 }
 
 function _clearWorkspaceDetail(){
@@ -6982,7 +6997,9 @@ function _setProfileHeaderButtons(mode, p, activeName){
   }
 }
 
-function openProfileDetail(name, el){
+function openProfileDetail(name, el, routeTicket = null){
+  const navigationTicket = typeof navigationBegin === 'function' ? navigationBegin(routeTicket) : null;
+  if (navigationTicket && !navigationCurrent(navigationTicket)) return;
   if (!_profilesCache || !_profilesCache.profiles) return;
   const p = _profilesCache.profiles.find(x => x.name === name);
   if (!p) return;
@@ -6992,6 +7009,7 @@ function openProfileDetail(name, el){
   _profilePreFormDetail = null;
   _renderProfileDetail(p, _profilesCache.active);
   _closeMobileSidebarAfterPanelSelection();
+  if (typeof navigationChanged === 'function') navigationChanged(navigationTicket);
 }
 
 function _clearProfileDetail(){
@@ -8138,6 +8156,8 @@ function _renderComposerSituationalControlChips(){
 }
 
 function switchSettingsSection(name,opts){
+  const navigationTicket = typeof navigationBegin === 'function' ? navigationBegin(opts && opts.navigationTicket) : null;
+  if (navigationTicket && !navigationCurrent(navigationTicket)) return;
   // If the main content is not showing settings, just remember the section
   // without force-switching the panel. The section will be applied when the
   // user next opens settings via switchPanel(). (#appearance-auto-reopen)
@@ -8180,6 +8200,7 @@ function switchSettingsSection(name,opts){
     if(section==='extensions') loadExtensionsPanel();
   }
   if(opts&&opts.fromSidebarItem)_closeMobileSidebarAfterPanelSelection();
+  if (typeof navigationChanged === 'function') navigationChanged(navigationTicket);
 }
 
 function _normalizeSettingsSearchText(value) {

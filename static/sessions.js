@@ -1876,7 +1876,7 @@ async function loadSession(sid){
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
-    if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
+    if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve && !(typeof navigationHasRoute === 'function' && navigationHasRoute())){
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
         return;
@@ -4313,6 +4313,7 @@ function _sessionUrlForSid(sid){
   return base.pathname+base.search+base.hash;
 }
 function _setActiveSessionUrl(sid){
+  if (typeof navigationSessionUrl === 'function' && navigationSessionUrl(sid)) return;
   if(typeof window==='undefined'||!window.history||!sid) return;
   const next=_sessionUrlForSid(sid);
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
@@ -9243,6 +9244,7 @@ if(typeof window!=='undefined'){
     void _handleShowAllProfilesStorageEvent(e);
   });
   window.addEventListener('popstate', () => {
+    if (typeof navigationPopState === 'function') { navigationPopState(); return; }
     const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
     if(!sid || (S.session && S.session.session_id===sid)) return;
     // Refuse to switch sessions mid-stream — same UX guard the storage-event

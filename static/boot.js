@@ -3706,7 +3706,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _profileSwitchIsDefaultBefore=!!S.activeProfileIsDefault;
   let _profileSwitchCompleted=false;
   let _profileSwitchChangedProfile=false;
-  if(profileIntent&&profileIntent.hasParam){
+  if(profileIntent&&profileIntent.hasParam && !(typeof navigationHasRoute === 'function' && navigationHasRoute())){
     try{
       if(profileIntent.valid){
         if(typeof switchToProfile==='function'){
@@ -3938,7 +3938,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
-})().catch(e=>{
+})().then(async()=>{
+  // Covers every successful early-return boot path, without another listener.
+  if(typeof initPersistentNavigation==='function') await initPersistentNavigation();
+}).catch(e=>{
   console.error('[hermes] boot failed', e);
   try{S._bootReady=true;}catch(_){}
   try{syncTopbar();}catch(_){}
