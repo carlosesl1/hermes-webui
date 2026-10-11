@@ -2690,19 +2690,13 @@
   .icon-btn.composer-mobile-config-btn{display:none;}
   .composer-mobile-config-btn.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);opacity:1;}
   .composer-mobile-config-panel{display:none;position:absolute;left:8px;right:8px;bottom:calc(100% + 6px);z-index:180;padding:8px;gap:8px;align-items:stretch;justify-content:flex-start;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border2);border-radius:12px;box-shadow:0 -6px 28px rgba(0,0,0,.35);overflow:visible;}
-  .composer-mobile-config-panel.open{display:flex;}
+  .composer-mobile-config-panel.open{display:grid;}
   .composer-mobile-config-action{box-sizing:border-box;display:inline-flex;align-items:center;gap:10px;min-width:0;min-height:44px;padding:8px 10px;border-radius:10px;border:1px solid transparent;background:transparent;color:var(--muted);font:inherit;text-align:left;cursor:pointer;overflow:hidden;}
   .composer-mobile-config-action.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
   .composer-mobile-config-copy{display:flex;flex-direction:column;gap:1px;min-width:0;line-height:1.2;}
-  /* The kicker labels (WORKSPACE / MODEL / REASONING / CONTEXT) duplicate the
-     meaning the row icon already conveys, and at iPhone 14 width (390px) the
-     ~60px copy column truncates them. Hide them inside the open panel — the
-     icon + value gives a cleaner two-row layout per pill. The .context row
-     keeps its kicker because it stretches to 100% width and has more value
-     content (usage / tokens / threshold). See #1381 review feedback. */
-  .composer-mobile-config-action:not(.composer-mobile-context-action) .composer-mobile-config-kicker{display:none;}
+  /* Full-width model/workspace rows keep values readable without hover. */
   .composer-mobile-config-kicker{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);}
-  .composer-mobile-config-value{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .composer-mobile-config-value{font-size:13px;color:var(--text);white-space:normal;overflow-wrap:anywhere;}
   .composer-mobile-context-action{flex:1 0 100%;align-items:flex-start;cursor:default;overflow:visible;}
   .composer-mobile-context-copy{flex:1 1 auto;gap:2px;}
   .composer-mobile-context-detail{font-size:11px;color:var(--muted);white-space:normal;line-height:1.25;}
@@ -3040,7 +3034,7 @@
   .composer-footer.cf-burger .composer-left > .composer-reasoning-wrap,
   .composer-footer.cf-burger .composer-left > .composer-toolsets-wrap{display:none!important;}
   .composer-footer.cf-burger .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
-  .composer-footer.cf-burger .composer-mobile-config-panel.open{display:flex;}
+  .composer-footer.cf-burger .composer-mobile-config-panel.open{display:grid;}
   .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
   .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%;}
   .composer-footer.cf-burger .ctx-indicator-wrap{display:none!important;}
@@ -3163,7 +3157,7 @@
        narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */
     #btnSavedPrompts,.saved-prompts-popup{display:none!important;}
     .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
-    .composer-mobile-config-panel.open{display:flex;}
+    .composer-mobile-config-panel.open{display:grid;}
     .composer-mobile-config-action{box-sizing:border-box;flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
     .composer-mobile-context-action{flex:1 0 100%;}
     /* icon-only composer chips continue below mobile widths */
@@ -3439,7 +3433,7 @@
 .vscroll-measuring .msg-foot,
 .vscroll-measuring .msg-actions,
 .vscroll-measuring .msg-time{transition:none !important;}
-.msg-action-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 5px;border-radius:5px;transition:color .12s,background .12s;line-height:1;}
+.msg-action-btn{display:inline-flex;align-items:center;justify-content:center;min-width:24px;min-height:24px;box-sizing:border-box;background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:4px 5px;border-radius:5px;transition:color .12s,background .12s;line-height:1;}
 .msg-action-btn:hover{color:var(--accent-text);background:var(--accent-bg);}
 .selected-text-action-group{position:fixed;z-index:1200;display:inline-flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--border2);border-radius:999px;background:var(--bg);box-shadow:0 8px 24px rgba(0,0,0,.26),0 0 0 1px var(--surface);visibility:hidden;opacity:0;pointer-events:none;transform:translateY(4px);transition:visibility 0s linear .12s,opacity .12s ease,transform .12s ease;user-select:none;}
 .selected-text-action-group.visible{visibility:visible;opacity:1;pointer-events:auto;transform:translateY(0);transition-delay:0s;}
@@ -6573,7 +6567,39 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   .assistant-turn .msg-foot{opacity:1;}
   .msg-actions{opacity:1;}
   .msg-actions{gap:4px;}
-  .msg-action-btn{min-width:40px;min-height:40px;padding:8px;display:inline-flex;align-items:center;justify-content:center;}
+  .msg-action-btn{min-width:44px;min-height:44px;padding:8px;display:inline-flex;align-items:center;justify-content:center;}
+}
+
+/* Progressive disclosure and readable composer options (UX-10/13/14/15). */
+.composer-mobile-config-panel{grid-template-columns:repeat(2,minmax(0,1fr));max-height:min(60dvh,420px);overflow:auto;overscroll-behavior:contain;}
+#composerMobileWorkspaceAction,#composerMobileModelAction,.composer-mobile-context-action{grid-column:1 / -1;}
+.composer-mobile-config-kicker{font-size:11px;line-height:1.4;}
+.composer-mobile-config-action{overflow:visible;}
+.settings-disclosure{margin-bottom:12px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--sidebar);}
+.settings-disclosure > summary{padding:12px 16px;min-height:44px;box-sizing:border-box;cursor:pointer;font-size:13px;font-weight:500;border-radius:var(--radius-lg);}
+.settings-disclosure > summary:hover{background:var(--hover-bg);}
+#mainSettings .settings-disclosure > .settings-field{margin:0;padding-top:8px;border:0;background:transparent;}
+.settings-export-formats{padding:0 16px 16px;}
+.settings-conversation-group{margin:20px 0;}
+.settings-conversation-group h3{margin:0 0 8px;font-size:13px;font-weight:500;}
+.settings-scope-note{margin:6px 0 12px;color:var(--muted);font-size:12px;line-height:1.5;}
+.settings-conversation-danger{border-top:1px solid var(--border);padding-top:20px;margin-top:28px;}
+.settings-action-btn{min-height:44px;}
+.msg-row:focus-within .msg-foot,.msg-row:focus-within .msg-actions,.assistant-turn:focus-within .msg-actions{opacity:1;pointer-events:auto;}
+/* Inset outlines stay visible in scroll containers and compact action rows. */
+.msg-action-btn:focus-visible,.composer-footer :is(button,select):focus-visible,
+#mainSettings :is(button,input,select,textarea,summary):focus-visible,
+#mainSettings .settings-field :is(input,select,textarea):focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
+@media (pointer:coarse){
+  .msg-action-btn{min-width:44px;min-height:44px;}
+  .msg-row .msg-foot,.msg-row .msg-actions,.assistant-turn .msg-foot,.assistant-turn .msg-actions{opacity:1;pointer-events:auto;}
+}
+@media(max-width:640px){
+  #auxModelsContainer > div{grid-template-columns:minmax(0,1fr) 44px!important;}
+  #auxModelsContainer > div > div{grid-column:1 / -1;}
+  #auxModelsContainer select{grid-column:1;min-width:0;}
+  #auxModelsContainer .model-advanced-btn{grid-column:2;grid-row:2 / span 2;min-width:44px;min-height:44px;}
+  #mainSettings .settings-field > label:has(input[type="checkbox"]){min-height:44px;}
 }
 
 /* ── /btw ephemeral side-question bubble ── */
