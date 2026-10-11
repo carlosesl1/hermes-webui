@@ -802,15 +802,10 @@ function _micToastKeyForRecognitionError(error){
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
     S.pendingFiles.push(file);
     renderTray();
-    // An explicit Send-button click while recording sets _micPendingSend — that
-    // is an unambiguous send intent, so honor it even when the composer already
-    // has text (mirrors the transcribe path). Otherwise (manual mic-stop): send
-    // immediately only if the composer is empty, else just attach + toast so the
-    // user can keep composing.
+    // Stop always prepares an attachment for review, regardless of draft text.
+    // Only an explicit Send-button click while recording authorizes sending.
     if(window._micPendingSend){
       window._micPendingSend=false;
-      send();
-    }else if(!ta.value.trim()){
       send();
     }else{
       showToast(t('voice_raw_attached'));
@@ -870,7 +865,54 @@ function _micToastKeyForRecognitionError(error){
     return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
   }
 
+  // A failed recording stays here until retry succeeds, it is attached, or the
+  // user explicitly discards it. Do not replace it with a new capture silently.
+  let _failedRecording=null;
+  let _transcriptionBusy=false;
+
+  function _clearRecordingRecovery(){
+    const panel=$('micRecordingRecovery');
+    if(panel) panel.remove();
+    _failedRecording=null;
+  }
+
+  function _showRecordingRecovery(blob, prefixSnapshot){
+    _clearRecordingRecovery();
+    _failedRecording={blob,prefixSnapshot};
+    const panel=document.createElement('div');
+    panel.id='micRecordingRecovery';
+    panel.setAttribute('role','group');
+    panel.setAttribute('aria-label',t('voice_recording_saved'));
+    const message=document.createElement('p');
+    message.setAttribute('role','status');
+    message.textContent=t('voice_recording_saved');
+    panel.appendChild(message);
+    const actions=[
+      ['micRetryTranscription','voice_retry_transcription',()=>_transcribeBlob(blob,prefixSnapshot)],
+      ['micAttachRecording','voice_attach_recording',()=>{
+        window._micPendingSend=false;
+        _clearRecordingRecovery();
+        void _sendRawAudio(blob);
+      }],
+      ['micDiscardRecording','voice_discard_recording',()=>_clearRecordingRecovery()],
+    ];
+    for(const [id,key,action] of actions){
+      const button=document.createElement('button');
+      button.type='button';
+      button.id=id;
+      button.className='btn btn-sm';
+      button.textContent=t(key);
+      button.onclick=()=>{if(!_transcriptionBusy) action();};
+      panel.appendChild(button);
+    }
+    ta.parentElement.insertBefore(panel,ta);
+  }
+
   async function _transcribeBlob(blob, prefixSnapshot){
+    if(_transcriptionBusy) return;
+    _transcriptionBusy=true;
+    const panel=$('micRecordingRecovery');
+    if(panel) panel.querySelectorAll('button').forEach(button=>button.disabled=true);
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
@@ -885,8 +927,12 @@ function _micToastKeyForRecognitionError(error){
         err.status=res.status;
         throw err;
       }
-      _commitTranscript(data.transcript||'', prefixSnapshot);
+      if(!String(data.transcript||'').trim()) throw new Error(t('voice_transcription_empty'));
+      _clearRecordingRecovery();
+      _commitTranscript(data.transcript, prefixSnapshot);
     }catch(err){
+      window._micPendingSend=false;
+      _showRecordingRecovery(blob,prefixSnapshot);
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
         localStorage.setItem(_micForceMediaRecorderKey,'0');
@@ -898,6 +944,7 @@ function _micToastKeyForRecognitionError(error){
       window._micPendingSend=false;
       showToast(err.message||t('mic_network'));
     }finally{
+      _transcriptionBusy=false;
       setComposerStatus('');
     }
   }
@@ -1164,7 +1211,12 @@ function _micToastKeyForRecognitionError(error){
   }
 
   async function _startMicCapture(holdRequired=false){
-    if(!_micButtonAvailable()) return;
+    if(!_micButtonAvailable()||_transcriptionBusy) return;
+    if(_failedRecording){
+      const retry=$('micRetryTranscription');
+      if(retry) retry.focus();
+      return;
+    }
     const startSeq=++_micStartSeq;
     // Race-condition guard: ignore rapid double-clicks
     if(_isRecording){
@@ -2494,17 +2546,8 @@ document.addEventListener('keydown',async e=>{
     if(composer){e.preventDefault();composer.focus();}
     return;
   }
-  // Enter on approval card = Allow once (when a button inside the card is focused or
-  // card is visible and focus is not on an input/textarea/select)
-  if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
-    const card=$('approvalCard');
-    const tag=(document.activeElement||{}).tagName||'';
-    if(card&&card.classList.contains('visible')&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
-      e.preventDefault();
-      if(typeof respondApproval==='function') respondApproval('once');
-      return;
-    }
-  }
+  // Approval decisions use native button activation only: Enter/Space must
+  // honor the focused decision, never grant permission from elsewhere.
   if((e.metaKey||e.ctrlKey)&&e.key==='k'){
     const t=e.target;
     const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
