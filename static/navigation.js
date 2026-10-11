@@ -130,7 +130,8 @@ async function _navigationRestore(initial = false) {
     }
     const sid = _sessionIdFromLocation();
     if (!initial && sid && sid !== S.session?.session_id && S.busy) { _navigationUndo(); return; }
-    if (!await switchPanel(route.panel, {navigationTicket:ticket}) || !navigationCurrent(ticket)) {
+    const preserveSettingsForm = !initial && route.panel === 'settings' && _currentPanel === 'settings';
+    if ((!preserveSettingsForm && !await switchPanel(route.panel, {navigationTicket:ticket})) || !navigationCurrent(ticket)) {
       if (navigationCurrent(ticket)) _navigationUndo();
       return;
     }

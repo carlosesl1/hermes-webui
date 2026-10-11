@@ -7365,7 +7365,7 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
   dialog.app-dialog .danger{color:var(--error);}
   #composerActionLabel{font-size:var(--font-size-sm);color:var(--text);max-width:190px;white-space:normal;line-height:1.35;text-align:right;}
   #composerActionLabel[hidden],#btnComposerStop[hidden]{display:none!important;}
-  #btnComposerStop{min-width:44px;min-height:44px;flex-shrink:0;}
+  #btnComposerStop{min-width:44px;min-height:44px;flex-shrink:0;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface);color:var(--text);font:inherit;cursor:pointer;padding:var(--space-1) var(--space-2);}
   .composer-right{min-width:0;max-width:100%;flex-wrap:wrap;}
   .composer-footer:has(#composerActionLabel:not([hidden])),
   .composer-footer:has(#composerOperationalStatus:not(:empty)){flex-wrap:wrap;}

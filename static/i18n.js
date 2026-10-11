@@ -5,6 +5,15 @@
 
 const LOCALES = {
   en: {
+    cron_preview_loading: "Checking next execution…",
+    cron_preview_empty: "Enter a schedule to preview its next execution.",
+    cron_preview_next: "Next execution (schedule preview)",
+    cron_preview_invalid: "Invalid schedule",
+    cron_preview_none: "The scheduler returned no next execution for this schedule.",
+    cron_preview_unavailable: "Schedule preview is unavailable in this scheduler.",
+    cron_preview_failed: "Could not load the preview. Edit the schedule to retry.",
+    cron_preview_once: "The scheduler interprets this schedule as a one-time execution.",
+    cron_preview_hint: "Evaluated now; saving may change relative times. This preview does not activate paused jobs.",
     // Interaction safety and recoverable UX (canonical English fallback).
     voice_recording_saved: "Recording kept. Retry transcription or attach the audio.",
     voice_retry_transcription: "Retry transcription",
@@ -14002,6 +14011,16 @@ const LOCALES = {
   },
 
   pt: {
+    settings_unsaved_changes: 'Você tem alterações não salvas.',
+    cron_preview_loading: "Consultando a próxima execução…",
+    cron_preview_empty: "Informe um agendamento para consultar a próxima execução.",
+    cron_preview_next: "Próxima execução (prévia do agendamento)",
+    cron_preview_invalid: "Agendamento inválido",
+    cron_preview_none: "O agendador não retornou uma próxima execução para este agendamento.",
+    cron_preview_unavailable: "A prévia não está disponível neste agendador.",
+    cron_preview_failed: "Não foi possível carregar a prévia. Edite o agendamento para tentar novamente.",
+    cron_preview_once: "O agendador interpreta este agendamento como uma execução única.",
+    cron_preview_hint: "Calculada agora; horários relativos podem mudar ao salvar. Esta prévia não ativa tarefas pausadas.",
     // Interaction safety and recoverable UX (canonical English fallback).
     voice_recording_saved: "Gravação preservada. Tente transcrever novamente ou anexe o áudio.",
     voice_retry_transcription: "Tentar transcrição novamente",
@@ -14514,7 +14533,7 @@ const LOCALES = {
     session_copy_link_desc: 'Copia um link direto para esta conversa',
     session_link_copied: 'Link da conversa copiado para a área de transferência',
     session_link_copy_failed: 'Falha ao copiar link da conversa: ',
-    share_session: 'Share',
+    share_session: 'Compartilhar',
     share_session_tooltip: 'Create a public read-only share link',
     share_session_status_active: 'Public share active',
     share_session_existing_confirm: 'This conversation already has a public read-only share link.\n\nChoose Copy existing to reuse that link, or Refresh snapshot to rebuild the public snapshot from the latest visible messages.',
@@ -14523,7 +14542,7 @@ const LOCALES = {
     share_session_link_copied: 'Share link copied to clipboard',
     share_session_created: 'Public share link created',
     share_session_failed: 'Share failed: ',
-    stop_sharing_session: 'Stop sharing',
+    stop_sharing_session: 'Parar de compartilhar',
     stop_sharing_session_tooltip: 'Revoke the public read-only share link for this conversation',
     stop_sharing_session_confirm: 'Revoke this public share link? Anyone opening the old link will see that it is no longer available.',
     share_session_revoked: 'Public share link revoked',

@@ -2394,8 +2394,16 @@ async function clearPreview(opts={}){
   const closePanelAfter=_workspacePanelMode==='preview'&&!keepPanelOpen;
   const pa=$('previewArea');if(pa)pa.classList.remove('visible');
   const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
-  const pdf=$('previewPdfFrame');if(pdf)pdf.src='';
-  const html=$('previewHtmlIframe');if(html)html.src='';
+  for (const id of ['previewPdfFrame','previewHtmlIframe']) {
+    const frame=$(id);
+    if(frame && (frame.getAttribute('src') || frame.hasAttribute('srcdoc'))) {
+      // Remove the old browsing context instead of adding an about:blank
+      // navigation to the browser's joint Back/Forward history.
+      const blank=frame.cloneNode(false);
+      blank.removeAttribute('src');blank.removeAttribute('srcdoc');
+      frame.replaceWith(blank);
+    }
+  }
   const pm=$('previewMd');if(pm)pm.innerHTML='';
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';

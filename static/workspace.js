@@ -1192,11 +1192,12 @@ async function openFile(path, opts={}){
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
-    const frame=$('previewPdfFrame');
-    if(frame){
-      frame.src=''; // clear first to avoid stale content
+    const previousFrame=$('previewPdfFrame');
+    if(previousFrame){
+      const frame=previousFrame.cloneNode(false);
       frame.src=url;
       frame.title=`PDF preview: ${path.split('/').pop()||path}`;
+      previousFrame.replaceWith(frame);
     }
   } else if(MD_EXTS.has(ext)){
     // Markdown: fetch text, render with renderMd, display as formatted HTML
@@ -1232,10 +1233,11 @@ async function openFile(path, opts={}){
     // allow-scripts (or add sandbox="") to disable all JS execution.
     showPreview('html');
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
-    const iframe=$('previewHtmlIframe');
-    if(iframe){
-      iframe.src=''; // clear first to avoid stale content
+    const previousFrame=$('previewHtmlIframe');
+    if(previousFrame){
+      const iframe=previousFrame.cloneNode(false);
       iframe.src=url;
+      previousFrame.replaceWith(iframe);
     }
   } else if(ext==='.csv'){
     try{

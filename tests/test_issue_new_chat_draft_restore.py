@@ -92,7 +92,7 @@ def test_restore_helper_validates_candidate_with_session_metadata():
 
 
 def test_session_switch_awaits_immediate_draft_flush_before_loading_target():
-    assert "return api('/api/session/draft'" in SESSIONS_JS, (
+    assert "return _persistComposerDraft(sid,normalizedText,files);" in SESSIONS_JS, (
         "_saveComposerDraftNow should return its POST promise so switch-away can await it"
     )
     assert "await _saveComposerDraftNow(currentSid" in SESSIONS_JS, (
@@ -113,11 +113,13 @@ def test_immediate_empty_draft_flush_clears_locally_known_server_draft():
     assert "_composerDraftKnownPayloadSessions.add(sid);" in save_body, (
         "debounced non-empty draft saves must mark the session as having server-side draft payload"
     )
-    assert "_rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);" in save_body
+    assert "_persistComposerDraft(sid,normalizedText,files,profile);" in save_body
     assert "!_composerDraftKnownPayloadSessions.has(sid)" in now_body, (
         "empty immediate switch-away saves may only be skipped when no local/server draft payload is known"
     )
-    assert "_rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);" in now_body
+    assert "return _persistComposerDraft(sid,normalizedText,files);" in now_body
+    assert "_rememberComposerDraftPayloadState(sid,text,_composerDraftFilesForPersist(files))" in SESSIONS_JS
+    assert "return write;" in SESSIONS_JS
 
 
 def test_pre_switch_draft_flush_rechecks_stale_loading_guard():
@@ -161,11 +163,11 @@ def test_clear_composer_draft_forgets_same_new_chat_candidate():
     assert "_clearRememberedNewChatDraftSession(sid);" in body, (
         "sending a draft must stop New Chat from restoring that now-cleared candidate"
     )
-    assert "return api('/api/session/draft'" in body, (
+    assert "return _persistComposerDraft(sid,'',[]);" in body, (
         "clear path should return its POST promise for callers/tests that need to await it"
     )
-    assert "_rememberComposerDraftPayloadState(sid, '', []);" in body, (
-        "clear path must also clear local draft-payload tracking so send-then-switch can skip redundant empty flushes"
+    assert "return _persistComposerDraft(sid,'',[]);" in body, (
+        "clear must use the same serialized writer that updates payload tracking after successful persistence"
     )
 
 

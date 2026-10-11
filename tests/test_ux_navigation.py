@@ -50,7 +50,7 @@ function _closeMobileSidebarAfterPanelSelection(){} function setStatus(s){notice
 async function loadSkills(){} async function loadCrons(){} async function loadWorkspacesPanel(){}
 async function loadProfilesPanel(){} async function loadMemory(){} async function loadKanban(){}
 async function loadInsights(){} async function loadLogs(){} function loadTodos(){}
-function loadSettingsPanel(){} function loadProvidersPanel(){} function loadPluginsPanel(){} function loadExtensionsPanel(){}
+let settingsHydrations=0;function loadSettingsPanel(){settingsHydrations++;} function loadProvidersPanel(){} function loadPluginsPanel(){} function loadExtensionsPanel(){}
 function _setSkillHeaderButtons(){} function _renderSkillError(){}
 function _renderSkillDetail(name){_skillMode='read';$('skillDetailBody').textContent=name}
 function _renderCronDetail(job){_cronMode='read';_currentCronDetail=job}
@@ -201,3 +201,16 @@ def test_busy_history_veto_keeps_view_and_position(page):
     assert page.url == url
     assert page.evaluate('S.session.session_id') == 'B'
     assert page.evaluate('_currentPanel') == 'settings'
+
+
+def test_settings_history_preserves_unsaved_form_without_rehydration(page):
+    page.evaluate("async()=>{await switchPanel('settings');switchSettingsSection('appearance');switchSettingsSection('preferences');$('editor').value='unsaved max_tokens 8192';_settingsDirty=true;}")
+    before = page.evaluate("settingsHydrations")
+    page.evaluate("history.back()")
+    page.wait_for_function("_currentSettingsSection === 'appearance' && !_navigation.restoring")
+    assert page.evaluate("$('editor').value") == 'unsaved max_tokens 8192'
+    assert page.evaluate("settingsHydrations") == before
+    page.evaluate("history.forward()")
+    page.wait_for_function("_currentSettingsSection === 'preferences' && !_navigation.restoring")
+    assert page.evaluate("$('editor').value") == 'unsaved max_tokens 8192'
+    assert page.evaluate("_settingsDirty && settingsHydrations === " + str(before))

@@ -13,6 +13,15 @@ import pytest
 
 
 NEW_COPY_FALLBACK_KEYS = {
+    "cron_preview_loading",
+    "cron_preview_empty",
+    "cron_preview_next",
+    "cron_preview_invalid",
+    "cron_preview_none",
+    "cron_preview_unavailable",
+    "cron_preview_failed",
+    "cron_preview_once",
+    "cron_preview_hint",
     "attachment_discard",
     "attachment_omit_confirm",
     "attachment_ready",

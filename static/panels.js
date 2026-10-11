@@ -8555,10 +8555,16 @@ function _navigateToSettingsField(entry) {
   // The panes were populated when the index was built, so skip the tab-switch
   // lazy reload: loadProvidersPanel()/loadPluginsPanel() rebuild the pane DOM
   // from a fresh fetch and would detach the node mid-scroll.
-  switchSettingsSection(entry.sectionKey, { skipLazyLoad: true });
+  switchSettingsSection(entry.sectionKey, { skipLazyLoad: true, fromSidebarItem: true });
   requestAnimationFrame(() => {
     const el = _resolveSettingsField(entry);
     if (!el) return;
+    for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+      if (parent.tagName === 'DETAILS') parent.open = true;
+    }
+    const focus = el.querySelector('input:not([type=hidden]),select,textarea,button,a[href]') || el;
+    if (focus === el && !el.hasAttribute('tabindex')) el.tabIndex = -1;
+    focus.focus({ preventScroll: true });
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     _highlightSettingsField(el);
   });

@@ -6042,6 +6042,8 @@ function _scheduleMessageJumpScrollReconcile(generation,ms){
   _messageJumpScrollSettleTimer=setTimeout(()=>_finishMessageJumpScroll(generation),ms||220);
 }
 function _beginMessageJumpScroll(container){
+  // A deliberate jump supersedes queued pre-jump viewport snapshots.
+  if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
   const previous=_messageJumpScrollOwner;
   const preserved=previous?previous.preserved:{
     scrollPinned:_scrollPinned,
@@ -16299,6 +16301,9 @@ function _restorePinnedMessageScrollSnapshot(snapshot){
 function _restoreMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
+  // Hydration can queue an anchor restore for the next paint. Never cancel a
+  // newer explicit smooth jump with that render-maintenance write.
+  if(typeof _messageJumpScrollOwner!=='undefined' && _messageJumpScrollOwner?.container===el) return;
   // A delayed restore from session A must not reposition or unpin session B.
   if(Object.prototype.hasOwnProperty.call(snapshot,'sessionId') &&
      snapshot.sessionId!==(typeof S!=='undefined'&&S.session?S.session.session_id:null)) return;

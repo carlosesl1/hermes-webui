@@ -209,6 +209,7 @@ def test_openfile_download_only_path_preserves_existing_office_save_route():
     js = (
         _extract_workspace_block("const DOWNLOAD_EXTS = new Set([", "function fileExt")
         + "function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }\n"
+        + _extract_workspace_function("_previewContext")
         + _extract_workspace_function("openFile")
         + "\nconst S = { session: { session_id: 'sid-1' } };\n"
         + "let _previewServerEditable = true;\n"
