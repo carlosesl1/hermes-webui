@@ -21934,15 +21934,119 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
   }catch(e){setStatus(t('folder_create_failed')+e.message);}
 }
 
+// Attachment submission recovery is separate from the next editable draft.
+const _attachmentSubmissions=new Map();
+let _attachmentSendInProgress=false;
+function _attachmentOwner(sid,profile){return JSON.stringify([profile||S.activeProfile||'default',sid||(S.session&&S.session.session_id)||'']);}
+function _attachmentText(key,fallback){return typeof _t==='function'?_t(key,fallback):(t(key)===key?fallback:t(key));}
+function _attachmentResult(file,owner){
+  if(file._uploadOwner===owner&&file._uploadedAttachment)return file._uploadedAttachment;
+  if(file.path&&!file.needsReselect)return {name:file.name||file.filename||file.path,path:file.path,mime:file.type||file.mime,size:file.size,is_image:!!file.is_image,extracted:file.extracted};
+  return null;
+}
+function _attachmentRecover(files){
+  return (files||[]).filter(Boolean).map(f=>{
+    if(typeof Blob!=='undefined'&&f instanceof Blob)return f;
+    if(typeof f==='string')return {name:f,path:'',needsReselect:true};
+    return {...f,needsReselect:!f.path};
+  });
+}
+function _attachmentSubmissionCurrent(){
+  const key=_attachmentOwner();
+  if(!_attachmentSubmissions.has(key)){
+    try{
+      const saved=JSON.parse(localStorage.getItem('hermes-attachment-submission:'+key)||'null');
+      if(saved&&saved.key===key&&Array.isArray(saved.files)){
+        saved.files=_attachmentRecover(saved.files);saved.status='pending';
+        _attachmentSubmissions.set(key,saved);
+      }
+    }catch(_){/* An unavailable browser store must not block the composer. */}
+  }
+  return _attachmentSubmissions.get(key)||null;
+}
+function _attachmentSubmissionSave(entry){
+  _attachmentSubmissions.set(entry.key,entry);
+  try{
+    const files=entry.files.map(f=>{
+      const ready=_attachmentResult(f,entry.key);
+      return ready?{...ready,name:f.name||ready.name}: {name:f.name,size:f.size,type:f.type,needsReselect:true};
+    });
+    localStorage.setItem('hermes-attachment-submission:'+entry.key,JSON.stringify({...entry,files,status:'pending'}));
+    entry.notSaved=false;
+  }catch(_){entry.notSaved=true;}
+}
+function _attachmentSubmissionFinish(entry){
+  if(!entry)return;
+  _attachmentSubmissions.delete(entry.key);
+  try{localStorage.removeItem('hermes-attachment-submission:'+entry.key);}catch(_){
+    if(typeof _composerDraftSaveErrors!=='undefined')_composerDraftSaveErrors.add(entry.key);
+  }
+  _attachmentSubmissions.set(entry.key,null);
+  renderTray();
+}
+function _attachmentSubmissionOwned(entry,generation){
+  return entry.key===_attachmentOwner()&&(typeof _loadSessionGeneration==='undefined'||generation===_loadSessionGeneration);
+}
+function _attachmentPersistDraft(){
+  if(typeof _saveComposerDraft==='function'&&S.session)_saveComposerDraft(S.session.session_id,$('msg').value,[...S.pendingFiles]);
+}
+function _attachmentReselect(files,index,save){
+  const owner=_attachmentOwner(),original=files[index];
+  const picker=document.createElement('input');picker.type='file';
+  picker.onchange=()=>{
+    if(owner!==_attachmentOwner()||files[index]!==original||!picker.files.length)return;
+    const file=picker.files[0];if(file.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(file);return;}
+    files[index]=file;save();renderTray();
+  };
+  picker.click();
+}
+function _attachmentRecoveryTray(tray){
+  const entry=_attachmentSubmissionCurrent();
+  const unsaved=typeof _composerDraftSaveErrors!=='undefined'&&_composerDraftSaveErrors.has(_attachmentOwner());
+  if(!entry&&!unsaved)return;
+  tray.classList.add('has-files');
+  const area=document.createElement('div');area.className='attachment-recovery';area.style.cssText='flex-basis:100%;min-width:0;overflow-wrap:anywhere';
+  const status=document.createElement('p');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
+  status.textContent=(unsaved||(entry&&entry.notSaved))?_attachmentText('draft_not_saved','Not saved — keep this tab open.'):_attachmentText('attachment_submission_pending','Message not sent. Resolve its attachments below; your next draft is separate.');
+  area.appendChild(status);
+  const button=(label,fn)=>{const b=document.createElement('button');b.type='button';b.className='btn';b.textContent=label;b.onclick=fn;b.disabled=!!(entry&&entry.status==='uploading');area.appendChild(b);return b;};
+  if(entry){
+    const preview=document.createElement('p');preview.textContent=entry.text;area.appendChild(preview);
+    entry.files.forEach((f,i)=>{
+      const row=document.createElement('p');
+      row.textContent=(f.name||f.path||'file')+' — '+(_attachmentResult(f,entry.key)?_attachmentText('attachment_ready','Ready'):f.needsReselect?_attachmentText('attachment_reselect','Select again'):_attachmentText('attachment_retry_needed','Upload pending / failed'));
+      area.appendChild(row);
+      if(f.needsReselect)button(_attachmentText('attachment_reselect','Select again')+': '+f.name,()=>_attachmentReselect(entry.files,i,()=>_attachmentSubmissionSave(entry)));
+      button(t('remove_title')+': '+f.name,()=>{entry.files.splice(i,1);_attachmentSubmissionSave(entry);renderTray();});
+    });
+    button(_attachmentText('attachment_retry','Retry sending'),()=>send({attachmentSubmission:entry}));
+    button(_attachmentText('attachment_discard','Discard unsent message'),async()=>{
+      if(await showConfirmDialog({title:_attachmentText('attachment_discard','Discard unsent message'),message:entry.text,confirmLabel:_attachmentText('attachment_discard','Discard unsent message'),danger:true,focusCancel:true})){
+        if(entry===_attachmentSubmissionCurrent()&&entry.status!=='uploading')_attachmentSubmissionFinish(entry);
+      }
+    });
+    if(entry.files.some(f=>!_attachmentResult(f,entry.key))){
+      button(_attachmentText('attachment_send_without','Send without unavailable files'),async()=>{
+        const ok=await showConfirmDialog({title:_attachmentText('attachment_send_without','Send without unavailable files'),message:_attachmentText('attachment_omit_confirm','Only ready attachments will be included. Continue?'),confirmLabel:_attachmentText('attachment_send_without','Send without unavailable files'),focusCancel:true});
+        if(ok&&entry===_attachmentSubmissionCurrent()&&entry.status!=='uploading')send({attachmentSubmission:entry,omitFailedAttachments:true});
+      });
+    }
+  }
+  tray.appendChild(area);
+}
+
 function renderTray(){ // non-media files use paperclip chip
-  const tray=$('attachTray');tray.innerHTML='';
-  if(!S.pendingFiles.length){tray.classList.remove('has-files');updateSendBtn();return;}
+  const tray=$('attachTray');if(!tray)return;
+  tray.querySelectorAll('[data-blob-url]').forEach(el=>URL.revokeObjectURL(el.dataset.blobUrl));
+  tray.innerHTML='';tray.classList.remove('has-files');
+  _attachmentRecoveryTray(tray);
+  if(!S.pendingFiles.length){updateSendBtn();return;}
   tray.classList.add('has-files');
   updateSendBtn();
   S.pendingFiles.forEach((f,i)=>{
     const chip=document.createElement('div');chip.className='attach-chip';
     const mediaKind=_mediaKindForName(f.name);
-    if(_IMAGE_EXTS.test(f.name)||mediaKind==='audio'||mediaKind==='video'){
+    if(typeof Blob!=='undefined'&&f instanceof Blob&&(_IMAGE_EXTS.test(f.name)||mediaKind==='audio'||mediaKind==='video')){
       const blobUrl=URL.createObjectURL(f);
       chip.className='attach-chip attach-chip--media attach-chip--'+mediaKind; // attach-chip--audio attach-chip--video
       chip.dataset.blobUrl=blobUrl;
@@ -21961,8 +22065,13 @@ function renderTray(){ // non-media files use paperclip chip
     chip.querySelector('button').onclick=()=>{
       // Revoke blob URL to avoid memory leak before removing
       if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
-      S.pendingFiles.splice(i,1);renderTray();
+      S.pendingFiles.splice(i,1);_attachmentPersistDraft();renderTray();
     };
+    if(f.needsReselect){
+      const reselect=document.createElement('button');reselect.type='button';
+      reselect.textContent=_attachmentText('attachment_reselect','Select again');
+      reselect.onclick=()=>_attachmentReselect(S.pendingFiles,i,_attachmentPersistDraft);chip.appendChild(reselect);
+    }
     tray.appendChild(chip);
   });
 }
@@ -21980,7 +22089,7 @@ function addFiles(files){
     if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
     if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);
   }
-  renderTray();
+  _attachmentPersistDraft();renderTray();
 }
 const _uploadPendingFilesProgressBySession=new Map();
 function _uploadPendingFilesCurrentSession(sessionId){
@@ -22032,35 +22141,43 @@ async function uploadPendingFiles(options={}){
   const sessionId=String(opts.sessionId||(S.session&&S.session.session_id)||'');
   if(!pendingFiles.length||!sessionId)return[];
   const clearPending=!(opts&&opts.clearPending===false);
-  const names=[];let failures=0;
+  const owner=_attachmentOwner(sessionId,opts.profile);
+  const names=[];const failed=[];
   _uploadPendingFilesUpdateProgress(sessionId,0);
   const total=pendingFiles.length;
   for(let i=0;i<total;i++){
     const f=pendingFiles[i];
     try{
+      const ready=_attachmentResult(f,owner);
+      if(ready){names.push(ready);continue;}
+      if(f.needsReselect||!(typeof Blob!=='undefined'&&f instanceof Blob))throw new Error(_attachmentText('attachment_reselect','Select again'));
       if(f&&f.size>MAX_UPLOAD_BYTES)throw new Error(_uploadTooLargeMessage(f));
       const fd=new FormData();
       fd.append('session_id',sessionId);fd.append('file',f,f.name);
       const isArchive=_ARCHIVE_EXTS.test(f.name);
       const url=new URL(isArchive?'api/upload/extract':'api/upload',document.baseURI||location.href).href;
       const res=await fetch(url,{method:'POST',credentials:'include',body:fd});
-      if(_redirectIfUnauth(res)) return;
+      if(_redirectIfUnauth(res))throw new Error('Authentication required');
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();
       if(data.error)throw new Error(data.error);
+      if(!(isArchive?data.dest:data.path))throw new Error('Upload returned no file path');
       if(isArchive){
         names.push({name: data.dest, path: data.dest, extracted: data.extracted});
         if(typeof loadDir==='function'&&_uploadPendingFilesCurrentSession(sessionId))loadDir(S.currentDir||'.');
       }else{
         names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image});
       }
-    }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
+      f._uploadOwner=owner;f._uploadedAttachment=names[names.length-1];
+    }catch(e){failed.push({file:f,error:String(e.message||e)});}
     _uploadPendingFilesUpdateProgress(sessionId,Math.round((i+1)/total*100));
   }
   _uploadPendingFilesUpdateProgress(sessionId,null);
-  if(clearPending&&_uploadPendingFilesCurrentSession(sessionId)){S.pendingFiles=[];renderTray();}
-  else if(typeof renderTray==='function'&&_uploadPendingFilesCurrentSession(sessionId))renderTray();
-  if(failures===total&&total>0)throw new Error(t('all_uploads_failed',total));
+  if(clearPending&&!failed.length&&owner===_attachmentOwner()){
+    S.pendingFiles=S.pendingFiles.filter(f=>!pendingFiles.includes(f));_attachmentPersistDraft();
+  }
+  if(typeof renderTray==='function'&&owner===_attachmentOwner())renderTray();
+  if(failed.length){const error=new Error(_attachmentText('attachment_retry_needed','Upload pending / failed'));error.failed=failed;error.uploaded=names;throw error;}
   // Show extraction summary
   const extracted=names.filter(n=>n.extracted);
   if(extracted.length)showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
