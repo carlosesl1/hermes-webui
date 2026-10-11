@@ -732,6 +732,8 @@ async function loadDir(path, opts={}){
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
   if (!preservePreview && typeof guardUnsavedEditors === 'function' && !await guardUnsavedEditors('workspace')) return;
+  // Clear before list I/O, never close a newer preview when the list settles.
+  if (!preservePreview && typeof clearPreview === 'function') clearPreview({keepPanelOpen:true, bypassGuard:true});
   const sessionId=S.session.session_id;
   const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
                              // switch bumps it (bumpWorkspaceTreeGen), so a stale response
@@ -777,13 +779,7 @@ async function loadDir(path, opts={}){
       }
       if(expanded.size>0)renderFileTree();
     }
-    if(!preservePreview&&typeof clearPreview==='function'){
-      if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview({keepPanelOpen:true});});
-      }else{
-        clearPreview({keepPanelOpen:true});
-      }
-    }else if(preservePreview){
+    if(preservePreview){
       await refreshOpenPreviewIfMutated();
     }
     // Fetch git info for workspace root (non-blocking)
@@ -892,7 +888,8 @@ function renderMarkdownPreviewContent(data){
   const target=data&&data.el?data.el:$('previewMd');
   if(!data||!data.el) showPreview('md');
   target.innerHTML=renderMd(data.content);
-  requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
+  const owner = _previewOwner;
+  requestAnimationFrame(()=>{if(_previewOwns(owner) && typeof renderKatexBlocks==='function')renderKatexBlocks();});
 }
 
 function renderCodePreviewContent(path, content){
@@ -958,7 +955,27 @@ let _previewSaveRoute = '/api/file/save';  // current save adapter for the open 
 let _previewOfficeFormat = '';  // current claimed Office format, if any
 let _previewPreviewKind = '';  // preview family returned by the backend
 
+// A path is not an owner: A→B→A and profile/session changes invalidate reads.
+let _previewGeneration = 0;
+let _previewOwner = null;
+let _previewLoaded = false;
+function _previewContext(){
+  return JSON.stringify([S.activeProfile, S.session?.session_id, S.session?.workspace,
+    typeof _profileSwitchGeneration === 'number' ? _profileSwitchGeneration : 0]);
+}
+function _previewOwns(owner){
+  return !!owner && owner === _previewOwner && owner.generation === _previewGeneration
+    && owner.context === _previewContext() && owner.path === _previewCurrentPath;
+}
+function invalidateWorkspacePreview(){
+  ++_previewGeneration;
+  _previewOwner = null;
+  _previewLoaded = false;
+  _previewRawContent = '';
+  _previewRawContentPath = '';
+}
 function showPreview(mode){
+  _previewLoaded = true;
   // mode: 'code' | 'csv' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
   $('previewCode').style.display     = mode==='code'  ? '' : 'none';
   $('previewImgWrap').style.display  = mode==='image' ? '' : 'none';
@@ -995,6 +1012,7 @@ function updateEditBtn(){
 }
 
 async function toggleEditMode(){
+  if (!_previewLoaded || !_previewOwns(_previewOwner)) return false;
   const editing = $('previewEditArea').style.display!=='none';
   if(_workspacePathIsReadOnly(_previewCurrentPath)){
     showToast(t('external_link_read_only'), 2000);
@@ -1010,13 +1028,14 @@ async function toggleEditMode(){
     const content=$('previewEditArea').value;
     const ticket = _beginEditorSave('workspace');
     if (!ticket) return false;
-    const owner = JSON.stringify([S.session.session_id, S.session.workspace, _previewCurrentPath]);
+    const owner = ticket.d.previewOwner;
+    if (!_previewOwns(owner)) { ticket.d.saving = false; return false; }
     try{
-      const saved=await api(_previewSaveRoute||'/api/file/save',{method:'POST',body:JSON.stringify({
-        session_id:S.session.session_id, path:_previewCurrentPath, content
+      const saved=await api(ticket.d.saveRoute,{method:'POST',body:JSON.stringify({
+        session_id:owner.sessionId, path:owner.path, content
       })});
       const savedContent=saved&&typeof saved.content==='string'?saved.content:content;
-      if (owner !== JSON.stringify([S.session?.session_id, S.session?.workspace, _previewCurrentPath])) return false;
+      if (!_previewOwns(owner) || _editorDrafts.get('workspace') !== ticket.d) return false;
       _previewRawContent = savedContent;
       _previewRawContentPath = _previewCurrentPath;
       if (_previewCurrentMode === 'code') $('previewCode').textContent = savedContent;
@@ -1043,7 +1062,7 @@ async function toggleEditMode(){
       showToast(t('saved'));
       updateEditBtn();
       return true;
-    }catch(e){setStatus(t('save_failed')+e.message);return false;}
+    }catch(e){if(_previewOwns(owner))setStatus(t('save_failed')+e.message);return false;}
     finally { ticket.d.saving = false; }
   }else{
     // Enter edit mode: populate textarea with current content
@@ -1053,6 +1072,8 @@ async function toggleEditMode(){
     $('previewEditArea').value=currentText;
     $('previewEditArea').style.display='';
     const draft = _trackEditor('workspace', $('previewEditArea'), toggleEditMode, () => cancelEditMode(true));
+    draft.previewOwner = _previewOwner;
+    draft.saveRoute = _previewSaveRoute || '/api/file/save';
     $('previewEditArea').oninput = () => { _previewDirty = _editorIsDirty(draft); updateEditBtn(); };
     if(_previewCurrentMode==='code') $('previewCode').style.display='none';
     else $('previewMd').style.display='none';
@@ -1115,7 +1136,9 @@ function _prismLanguageForPath(path){
 
 async function openFile(path, opts={}){
   if(!S.session)return;
+  const context = _previewContext();
   if (typeof guardUnsavedEditors === 'function' && !await guardUnsavedEditors('workspace')) return;
+  if (context !== _previewContext()) return false;
   if (typeof _editorDrafts !== 'undefined') _editorDrafts.delete('workspace');
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
@@ -1128,6 +1151,15 @@ async function openFile(path, opts={}){
     return;
   }
 
+  const cachedMarkdown = forceRichMarkdown && _previewOwns(_previewOwner)
+    && path === _previewRawContentPath ? _previewRawContent : '';
+  invalidateWorkspacePreview();
+  const owner = _previewOwner = {generation:_previewGeneration, context, path, sessionId:S.session.session_id};
+  // A pending read must not expose the previous file's editable text.
+  $('previewEditArea').style.display = 'none';
+  $('previewCode').textContent = '';
+  $('previewMd').innerHTML = '';
+  const editBtn = $('btnEditFile'); if(editBtn) editBtn.style.display = 'none';
   _previewServerEditable = null;
   _previewSaveRoute = '/api/file/save';
   _previewOfficeFormat = '';
@@ -1145,7 +1177,7 @@ async function openFile(path, opts={}){
     const url=_workspaceRouteForPath(path, 'raw') + cacheBust;
     $('previewImg').alt=path;
     $('previewImg').src=url;
-    $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
+    $('previewImg').onerror=()=>{if(_previewOwns(owner))setStatus(t('image_load_failed'));};
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
     showPreview(mode);
@@ -1174,9 +1206,10 @@ async function openFile(path, opts={}){
       // here (_previewCurrentPath was just assigned above), so guard on the
       // dedicated _previewRawContentPath instead — otherwise a force-render after a
       // file switch could re-render the previous file's cached content.
-      const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
-        ? {content:_previewRawContent}
+      const data=cachedMarkdown
+        ? {content:cachedMarkdown}
         : await api(_workspaceRouteForPath(path, 'read'));
+      if (!_previewOwns(owner)) return false;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
@@ -1187,7 +1220,7 @@ async function openFile(path, opts={}){
         return;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){setStatus(t('file_open_failed'));}
+    }catch(e){if(_previewOwns(owner))setStatus(t('file_open_failed'));}
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1207,6 +1240,7 @@ async function openFile(path, opts={}){
   } else if(ext==='.csv'){
     try{
       const data=await api(_workspaceRouteForPath(path, 'read'));
+      if (!_previewOwns(owner)) return false;
       if(data.binary){
         downloadFile(path);
         return;
@@ -1214,12 +1248,13 @@ async function openFile(path, opts={}){
       if(renderCsvPreviewContent(path, data.content)) return;
       renderCodePreviewContent(path, data.content);
     }catch(e){
-      downloadFile(path);
+      if(_previewOwns(owner)) downloadFile(path);
     }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
       const data=await api(_workspaceRouteForPath(path, 'read'));
+      if (!_previewOwns(owner)) return false;
       if(data.binary){
         // Server flagged this as binary content
         downloadFile(path);
@@ -1235,6 +1270,7 @@ async function openFile(path, opts={}){
       }
       renderCodePreviewContent(path, data.content);
   }catch(e){
+      if (!_previewOwns(owner)) return false;
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);

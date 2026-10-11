@@ -300,12 +300,12 @@ function ensureWorkspacePreviewVisible(){
   else syncWorkspacePanelUI();
 }
 
-function handleWorkspaceClose(){
-  if(_hasWorkspacePreviewVisible()){
-    clearPreview();
-    return;
-  }
+async function handleWorkspaceClose(){
+  if(_hasWorkspacePreviewVisible()) return clearPreview();
+  if(typeof guardUnsavedEditors==='function' && !await guardUnsavedEditors('workspace')) return false;
+  if(typeof invalidateWorkspacePreview==='function') invalidateWorkspacePreview();
   closeWorkspacePanel();
+  return true;
 }
 
 async function _maybeBindFreshDefaultWorkspaceSession(prefillIntent=null){
@@ -2299,7 +2299,13 @@ $('importFileInput').onchange=async(e)=>{
   }
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
-function clearPreview(opts={}){
+async function clearPreview(opts={}){
+  if(!opts.bypassGuard && typeof _editorNeedsGuard==='function' && _editorNeedsGuard('workspace')
+      && !await guardUnsavedEditors('workspace')) return false;
+  if(typeof invalidateWorkspacePreview==='function') invalidateWorkspacePreview();
+  if(typeof _editorDrafts!=='undefined') _editorDrafts.delete('workspace');
+  const editArea=$('previewEditArea');
+  if(editArea){editArea.style.display='none';editArea.oninput=null;editArea.onkeydown=null;}
   const keepPanelOpen=!!(opts&&opts.keepPanelOpen);
   // Restore directory breadcrumb after closing file preview
   if(typeof renderBreadcrumb==='function') renderBreadcrumb();
@@ -2316,6 +2322,7 @@ function clearPreview(opts={}){
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();
+  return true;
 }
 $('btnClearPreview').onclick=handleWorkspaceClose;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead

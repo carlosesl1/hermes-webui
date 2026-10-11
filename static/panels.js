@@ -404,7 +404,10 @@ function _editorSnapshot(d) {
   return values;
 }
 function _trackEditor(key, root, save, discard) {
-  const d = {key, root, save, discard, saving:false};
+  const context = () => JSON.stringify([S.activeProfile, S.session?.session_id, S.session?.workspace,
+    typeof _profileSwitchGeneration === 'number' ? _profileSwitchGeneration : 0]);
+  const owner = context();
+  const d = {key, root, save, discard, saving:false, ownsContext:() => owner === context()};
   d.baseline = _editorSnapshot(d);
   _editorDrafts.set(key, d);
   return d;
@@ -418,13 +421,13 @@ function _editorLoadedField(key, el) {
 }
 function _beginEditorSave(key) {
   const d = _editorDrafts.get(key);
-  if (!d || d.saving) return null;
+  if (!d || d.saving || !d.root.isConnected || !d.ownsContext()) return null;
   d.saving = true;
   return {d, snapshot:_editorSnapshot(d)};
 }
 function _acceptEditorSave(ticket) {
   const {d, snapshot} = ticket;
-  if (_editorDrafts.get(d.key) !== d || !d.root.isConnected) return false;
+  if (_editorDrafts.get(d.key) !== d || !d.root.isConnected || !d.ownsContext()) return false;
   d.baseline = snapshot;
   return !_editorIsDirty(d);
 }
@@ -445,6 +448,10 @@ function _editorExitChoice() {
 }
 // Await before changing panel/session/profile/workspace. false means do not navigate.
 // A key restricts the check to one editor; omitted means every active editor.
+function _editorNeedsGuard(key) {
+  return _editorGuardPending || [..._editorDrafts.values()].some(d =>
+    (!key || key === d.key) && d.root.isConnected && (d.saving || _editorIsDirty(d)));
+}
 async function guardUnsavedEditors(key) {
   if (_editorGuardPending) return false;
   _editorGuardPending = true;
@@ -5216,11 +5223,11 @@ function _setSkillHeaderButtons(mode) {
 }
 
 let _skillLoadGeneration = 0;
-async function openSkill(name, el, bypassGuard = false, routeTicket = null) {
+async function openSkill(name, el, bypassGuard = false, routeTicket = null, saveTicket = null) {
   const navigationTicket = typeof navigationBegin === 'function' ? navigationBegin(routeTicket) : null;
   if (!bypassGuard && !await guardUnsavedEditors('skill')) return false;
   if (navigationTicket && !navigationCurrent(navigationTicket)) return false;
-  _editorDrafts.delete('skill');
+  if (!saveTicket) _editorDrafts.delete('skill');
   const generation = ++_skillLoadGeneration;
   // Highlight active skill in the sidebar list
   document.querySelectorAll('.skill-item').forEach(e => e.classList.remove('active'));
@@ -5230,12 +5237,14 @@ async function openSkill(name, el, bypassGuard = false, routeTicket = null) {
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
     if (generation !== _skillLoadGeneration || (navigationTicket && !navigationCurrent(navigationTicket))) return false;
+    if (saveTicket && !_acceptEditorSave(saveTicket)) return false;
     if (data && (data.success === false || data.error)) {
       const message = data.error || t('skill_load_failed');
-      _renderSkillError(name, message);
+      if (!saveTicket) _renderSkillError(name, message);
       setStatus(t('skill_load_failed') + message);
       return;
     }
+    if (saveTicket) _editorDrafts.delete('skill');
     _currentSkillDetail = { name, content: data.content || '', linked_files: data.linked_files || {} };
     _renderSkillDetail(name, data.content || '', data.linked_files || {});
     _closeMobileSidebarAfterPanelSelection();
@@ -5411,8 +5420,7 @@ async function saveSkillForm() {
       const nm = el.querySelector('.skill-name');
       if (nm && nm.textContent === name) targetEl = el;
     });
-    await openSkill(name, targetEl, true);
-    return true;
+    return await openSkill(name, targetEl, true, null, ticket) === true;
   } catch(e) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; return false; }
   finally { ticket.d.saving = false; }
 }
@@ -7180,6 +7188,9 @@ async function switchToProfile(name) {
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
   if (name && name === S.activeProfile) return true;
+  if (typeof _editorNeedsGuard === 'function' && _editorNeedsGuard()
+      && !await guardUnsavedEditors()) return false;
+  if (typeof clearPreview === 'function') clearPreview({bypassGuard:true, keepPanelOpen:true});
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another

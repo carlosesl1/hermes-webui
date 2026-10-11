@@ -1417,6 +1417,9 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    if(typeof _editorNeedsGuard==='function' && _editorNeedsGuard()
+        && !await guardUnsavedEditors()) return false;
+    if(typeof clearPreview==='function') clearPreview({bypassGuard:true, keepPanelOpen:true});
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1756,6 +1759,11 @@ async function loadSession(sid){
     }
     return;
   }
+  // Keep the no-op above synchronous; all destructive navigation starts only
+  // after the old editor has saved/discarded under its original context.
+  if(typeof _editorNeedsGuard==='function' && _editorNeedsGuard()
+      && !await guardUnsavedEditors()) return false;
+  if(typeof clearPreview==='function') clearPreview({bypassGuard:true, keepPanelOpen:true});
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
