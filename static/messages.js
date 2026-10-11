@@ -263,12 +263,12 @@ function _chatPayloadModelState(){
 
 function _deferStreamErrorIfOffline(){
   if(typeof isOfflineBannerVisible==='function' && isOfflineBannerVisible()){
-    setComposerStatus(t('offline_stream_waiting'));
+    setComposerStatus(t('offline_stream_waiting'),undefined,'recovery');
     return true;
   }
   if(typeof showOfflineBanner==='function' && navigator.onLine===false){
     showOfflineBanner('browser');
-    setComposerStatus(t('offline_stream_waiting'));
+    setComposerStatus(t('offline_stream_waiting'),undefined,'recovery');
     return true;
   }
   return false;
@@ -2066,7 +2066,7 @@ async function send(){
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`,undefined,'error');
     // #5472: the send was rejected before the turn was durably started, so the
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
@@ -2883,7 +2883,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   function _deferStreamErrorIfPageHidden(source){
     if(!_pageHiddenForStreamError()) return false;
-    setComposerStatus('Connection paused. Reconnecting when this tab returns…');
+    setComposerStatus('Connection paused. Reconnecting when this tab returns…',undefined,'recovery');
     if(S.session&&S.session.session_id===activeSid&&streamId) S.activeStreamId=streamId;
     if(!_deferredStreamRecoveryBound){
       _deferredStreamRecoveryBound=true;
@@ -7004,7 +7004,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
         const _retryDelays=[1500,3000,5000,8000,12000,20000];
-        setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
+        setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`,undefined,'recovery');
         const _probeReconnect=async(attempt=0)=>{
           if(_terminalStateReached || _streamFinalized) return;
           if(!_isSessionCurrentPane(activeSid)) return;
@@ -7016,7 +7016,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               return;
             }
             if(st&&st.replay_available){
-              setComposerStatus('Restoring stream…');
+              setComposerStatus('Restoring stream…',undefined,'recovery');
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
@@ -7028,7 +7028,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(_deferStreamErrorIfPageHidden(source)) return;
           const nextDelay=_retryDelays[attempt+1];
           if(nextDelay){
-            setComposerStatus(`Reconnecting… (${attempt+2}/${_retryDelays.length})`);
+            setComposerStatus(`Reconnecting… (${attempt+2}/${_retryDelays.length})`,undefined,'recovery');
             setTimeout(()=>{void _probeReconnect(attempt+1);}, nextDelay);
             return;
           }
@@ -7037,7 +7037,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // status) and can recover a completed response without an error banner.
           // This is especially important on iOS where Tailscale reconnects can
           // take longer than the retry window.
-          setComposerStatus('Restoring session…');
+          setComposerStatus('Restoring session…',undefined,'recovery');
           let _restoreTimedOut=false;
           const _restoreTimer=setTimeout(()=>{
             // If _restoreSettledSession hangs (flaky Tailscale), don't leave
@@ -9301,7 +9301,7 @@ function _startClarifyFallbackPoll(sid) {
       if (isMissingEndpoint) {
         if (!_clarifyMissingEndpointWarned) {
           _clarifyMissingEndpointWarned = true;
-          setComposerStatus("Clarify unavailable on current server build. Restart server.");
+          setComposerStatus("Clarify unavailable on current server build. Restart server.",undefined,"error");
           if (typeof showToast === "function") {
             showToast("Clarify endpoint unavailable. Please restart server.", 5000);
           }

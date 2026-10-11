@@ -8341,14 +8341,38 @@ function setStatus(t){
 
 let _composerStatusTimer=null;
 
-function setComposerStatus(t,timeoutMs){
+function setComposerStatus(t,timeoutMs,kind='optional'){
   if(_composerStatusTimer!==null){
     clearTimeout(_composerStatusTimer);
     _composerStatusTimer=null;
   }
-  const el=$('composerStatus');
+  let el=$('composerStatus');
   if(!el)return;
-  const statusHidden=!!(window._composerControlVisibility&&window._composerControlVisibility.hide_composer_status);
+  const critical=['recovery','waiting','error'].includes(kind);
+  // One status owner/timer, two projections: preference reapplication must not
+  // hide operational state through the optional #composerStatus selector.
+  let operational=$('composerOperationalStatus');
+  if(critical&&!operational&&el.parentElement){
+    operational=document.createElement('span');
+    operational.id='composerOperationalStatus';
+    operational.className='composer-status composer-operational-status';
+    operational.setAttribute('role','status');
+    operational.setAttribute('aria-live','polite');
+    operational.setAttribute('aria-atomic','true');
+    el.insertAdjacentElement('afterend',operational);
+  }
+  if(operational){
+    operational.textContent='';
+    operational.style.display='none';
+    operational.dataset.statusKind='';
+  }
+  if(critical&&operational){
+    el.textContent='';
+    el.style.display='none';
+    el=operational;
+    el.dataset.statusKind=kind;
+  }
+  const statusHidden=!critical&&!!(window._composerControlVisibility&&window._composerControlVisibility.hide_composer_status);
   if(statusHidden){
     el.style.display='none';
     el.textContent='';
@@ -8395,10 +8419,17 @@ function lockComposerForClarify(placeholderText){
   }
   input.disabled=true;
   if(placeholderText) input.placeholder=placeholderText;
+  if(typeof setComposerStatus==='function'){
+    const key='composer_waiting_for_you';
+    const translated=typeof t==='function'?t(key):key;
+    setComposerStatus(translated&&translated!==key?translated:'Waiting for you',undefined,'waiting');
+  }
   updateSendBtn();
 }
 
 function unlockComposerForClarify(){
+  const operational=$('composerOperationalStatus');
+  if(operational&&operational.dataset.statusKind==='waiting') setComposerStatus('');
   const input=$('msg');
   if(!input) return;
   if(_composerLockState){
@@ -8530,8 +8561,46 @@ function updateSendBtn(){
     const _tmap={send:'Send message',queue:'Queue message',interrupt:'Interrupt and send',steer:'Steer current response',stop:'Stop generation'};
     _btnTitle=_tt('composer_'+action,_tmap[action]||'Send message');
   }
+  const busyLabels={queue:'Send after',steer:'Guide now',interrupt:'Interrupt and send'};
+  const actionLabel=busyLabels[action]?_tt('composer_action_'+action,busyLabels[action]):'';
+  if(actionLabel) _btnTitle=actionLabel;
   btn.title=_btnTitle;
+  btn.dataset.tooltip=_btnTitle;
+  // Dynamic actions must not be overwritten by a later static locale refresh.
+  if(btn.removeAttribute){
+    btn.removeAttribute('data-i18n-title');
+    btn.removeAttribute('data-i18n-aria-label');
+  }
   btn.setAttribute('aria-label',_btnTitle);
+  if(btn.parentElement){
+    let label=$('composerActionLabel');
+    if(!label){
+      label=document.createElement('span');
+      label.id='composerActionLabel';
+      label.className='composer-action-label';
+      label.setAttribute('aria-hidden','true');
+      btn.insertAdjacentElement('beforebegin',label);
+    }
+    label.textContent=actionLabel;
+    label.hidden=!actionLabel;
+    let stop=$('btnComposerStop');
+    if(!stop){
+      stop=document.createElement('button');
+      stop.id='btnComposerStop';
+      stop.type='button';
+      stop.className='btn btn-sm composer-stop';
+      stop.onclick=async()=>{
+        // Resolve at activation, never cancel a cached run or send the draft.
+        if(!S.busy||!S.activeStreamId||typeof cancelStream!=='function') return;
+        if(!await cancelStream('composer-stop')) showToast(t('cancel_failed'),null,'error');
+      };
+      label.insertAdjacentElement('beforebegin',stop);
+    }
+    stop.textContent=_tt('composer_action_stop','Stop');
+    stop.title=_tt('composer_stop','Stop generation');
+    stop.hidden=!(S.busy&&S.activeStreamId&&typeof cancelStream==='function'&&action!=='stop');
+    stop.disabled=stop.hidden;
+  }
   // Describe the resolved action, not the preference: explicit slash commands
   // and unavailable steer/cancel capabilities can change the actual behavior.
   const description=$('composerSendDescription');
@@ -8573,6 +8642,7 @@ async function handleComposerPrimaryAction(){
     return;
   }
   const action=typeof getComposerPrimaryAction==='function'?getComposerPrimaryAction():'send';
+  if(typeof updateSendBtn==='function') updateSendBtn();
   if(action==='disabled') return;
   if(action==='stop'){
     if(typeof cancelStream==='function' && !await cancelStream('composer-stop')) showToast(t('cancel_failed'),null,'error');
