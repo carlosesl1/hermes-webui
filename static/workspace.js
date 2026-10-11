@@ -731,6 +731,7 @@ async function loadDir(path, opts={}){
   const preservePreview=!!(opts&&opts.preservePreview);
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
+  if (!preservePreview && typeof guardUnsavedEditors === 'function' && !await guardUnsavedEditors('workspace')) return;
   const sessionId=S.session.session_id;
   const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
                              // switch bumps it (bumpWorkspaceTreeGen), so a stale response
@@ -1007,11 +1008,20 @@ async function toggleEditMode(){
     // Save
     if(!S.session||!_previewCurrentPath)return;
     const content=$('previewEditArea').value;
+    const ticket = _beginEditorSave('workspace');
+    if (!ticket) return false;
+    const owner = JSON.stringify([S.session.session_id, S.session.workspace, _previewCurrentPath]);
     try{
       const saved=await api(_previewSaveRoute||'/api/file/save',{method:'POST',body:JSON.stringify({
         session_id:S.session.session_id, path:_previewCurrentPath, content
       })});
       const savedContent=saved&&typeof saved.content==='string'?saved.content:content;
+      if (owner !== JSON.stringify([S.session?.session_id, S.session?.workspace, _previewCurrentPath])) return false;
+      _previewRawContent = savedContent;
+      _previewRawContentPath = _previewCurrentPath;
+      if (_previewCurrentMode === 'code') $('previewCode').textContent = savedContent;
+      if (!_acceptEditorSave(ticket)) { _previewDirty = true; return false; }
+      _editorDrafts.delete('workspace');
       if(saved && typeof saved.editable==='boolean') _previewServerEditable = saved.editable;
       if(saved && saved.preview_kind) _previewPreviewKind = saved.preview_kind;
       if(saved && saved.office_format) _previewOfficeFormat = saved.office_format;
@@ -1031,7 +1041,10 @@ async function toggleEditMode(){
       if(_previewCurrentMode==='code') $('previewCode').style.display='';
       else $('previewMd').style.display='';
       showToast(t('saved'));
-    }catch(e){setStatus(t('save_failed')+e.message);}
+      updateEditBtn();
+      return true;
+    }catch(e){setStatus(t('save_failed')+e.message);return false;}
+    finally { ticket.d.saving = false; }
   }else{
     // Enter edit mode: populate textarea with current content
     const currentText = _previewCurrentMode==='code'
@@ -1039,9 +1052,11 @@ async function toggleEditMode(){
       : _previewRawContent||'';
     $('previewEditArea').value=currentText;
     $('previewEditArea').style.display='';
+    const draft = _trackEditor('workspace', $('previewEditArea'), toggleEditMode, () => cancelEditMode(true));
+    $('previewEditArea').oninput = () => { _previewDirty = _editorIsDirty(draft); updateEditBtn(); };
     if(_previewCurrentMode==='code') $('previewCode').style.display='none';
     else $('previewMd').style.display='none';
-    // Escape cancels the edit without saving
+    // Escape asks before abandoning changed content.
     $('previewEditArea').onkeydown=e=>{
       if(e.key==='Escape'){e.preventDefault();cancelEditMode();}
     };
@@ -1052,7 +1067,9 @@ async function toggleEditMode(){
 let _previewRawContent = '';  // raw text for md files (to populate editor)
 let _previewRawContentPath = '';  // path that _previewRawContent belongs to (#3378 force-render cache guard)
 
-function cancelEditMode(){
+async function cancelEditMode(bypassGuard = false){
+  if (!bypassGuard && !await guardUnsavedEditors('workspace')) return false;
+  _editorDrafts.delete('workspace');
   // Discard changes and return to read-only view
   $('previewEditArea').style.display='none';
   $('previewEditArea').onkeydown=null;
@@ -1098,6 +1115,8 @@ function _prismLanguageForPath(path){
 
 async function openFile(path, opts={}){
   if(!S.session)return;
+  if (typeof guardUnsavedEditors === 'function' && !await guardUnsavedEditors('workspace')) return;
+  if (typeof _editorDrafts !== 'undefined') _editorDrafts.delete('workspace');
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);

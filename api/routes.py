@@ -1488,6 +1488,8 @@ def _cron_job_for_api(job: dict) -> dict:
     explicitly muted.
     """
     payload = dict(job or {})
+    from api.cron import scheduler_timezone
+    payload["scheduler_timezone"] = scheduler_timezone()
     payload.setdefault("profile", None)
     payload["toast_notifications"] = payload.get("toast_notifications") is not False
     return payload

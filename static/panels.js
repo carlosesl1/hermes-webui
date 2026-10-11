@@ -390,6 +390,86 @@ function _syncMobileSidebarPanelFromMainView(){
   return panel;
 }
 
+// Editor ownership is a DOM instance, not an item name (A→B→A is a new editor).
+const _editorDrafts = new Map();
+let _editorGuardPending = false;
+function _editorSnapshot(d) {
+  const values = {};
+  const fields = d.root.matches('textarea') ? [d.root] : d.root.querySelectorAll('input[id],textarea[id],select[id]');
+  for (const el of fields) {
+    if (/SchedulePreset|ScheduleTime|ScheduleWeekday|ScheduleMonthDay|ScheduleMinute|SkillSearch/.test(el.id)) continue;
+    values[el.id] = el.type === 'checkbox' ? el.checked : el.value;
+  }
+  if (d.key === 'cron') values.skills = JSON.stringify(_cronSelectedSkills);
+  return values;
+}
+function _trackEditor(key, root, save, discard) {
+  const d = {key, root, save, discard, saving:false};
+  d.baseline = _editorSnapshot(d);
+  _editorDrafts.set(key, d);
+  return d;
+}
+function _editorIsDirty(d) {
+  return !!d && d.root.isConnected && JSON.stringify(_editorSnapshot(d)) !== JSON.stringify(d.baseline);
+}
+function _editorLoadedField(key, el) {
+  const d = _editorDrafts.get(key);
+  if (d && d.root.contains(el)) d.baseline[el.id] = el.type === 'checkbox' ? el.checked : el.value;
+}
+function _beginEditorSave(key) {
+  const d = _editorDrafts.get(key);
+  if (!d || d.saving) return null;
+  d.saving = true;
+  return {d, snapshot:_editorSnapshot(d)};
+}
+function _acceptEditorSave(ticket) {
+  const {d, snapshot} = ticket;
+  if (_editorDrafts.get(d.key) !== d || !d.root.isConnected) return false;
+  d.baseline = snapshot;
+  return !_editorIsDirty(d);
+}
+function _editorExitChoice() {
+  // Same labels and app-dialog primitives as Settings; native dialog traps focus.
+  return new Promise(resolve => {
+    const lastFocus = document.activeElement;
+    const dialog = document.createElement('dialog');
+    dialog.className = 'app-dialog';
+    dialog.setAttribute('aria-labelledby', 'editorUnsavedTitle');
+    dialog.innerHTML = `<div class="app-dialog-title" id="editorUnsavedTitle">${esc(t('settings_unsaved_changes'))}</div><div class="app-dialog-actions"><button type="button" class="app-dialog-btn" data-choice="keep" autofocus>${esc(t('editor_keep_editing'))}</button><button type="button" class="app-dialog-btn danger" data-choice="discard">${esc(t('discard'))}</button><button type="button" class="app-dialog-btn confirm" data-choice="save">${esc(t('save'))}</button></div>`;
+    const finish = choice => { dialog.close(); dialog.remove(); if(lastFocus?.isConnected) lastFocus.focus(); resolve(choice); };
+    dialog.addEventListener('cancel', e => {e.preventDefault(); finish('keep');});
+    dialog.querySelectorAll('button').forEach(b => b.onclick = () => finish(b.dataset.choice));
+    document.body.appendChild(dialog);
+    dialog.showModal();
+  });
+}
+// Await before changing panel/session/profile/workspace. false means do not navigate.
+// A key restricts the check to one editor; omitted means every active editor.
+async function guardUnsavedEditors(key) {
+  if (_editorGuardPending) return false;
+  _editorGuardPending = true;
+  try {
+    for (const d of [..._editorDrafts.values()]) {
+      if (key && key !== d.key) continue;
+      if (!d.root.isConnected) { _editorDrafts.delete(d.key); continue; }
+      if (d.saving) return false;
+      if (!_editorIsDirty(d)) continue;
+      const choice = await _editorExitChoice();
+      if (choice === 'keep') return false;
+      if (choice === 'save') {
+        if (await d.save() !== true) return false;
+      } else {
+        _editorDrafts.delete(d.key);
+        d.discard();
+      }
+    }
+    return true;
+  } finally { _editorGuardPending = false; }
+}
+window.addEventListener('beforeunload', e => {
+  if ([..._editorDrafts.values()].some(d => d.saving || _editorIsDirty(d))) { e.preventDefault(); e.returnValue = ''; }
+});
+
 async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
@@ -413,6 +493,7 @@ async function switchPanel(name, opts = {}) {
       return false;
     }
   }
+  if (prevPanel !== nextPanel && !await guardUnsavedEditors()) return false;
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
   // Close any long-lived Kanban SSE stream when leaving the kanban panel
@@ -1223,6 +1304,19 @@ function _cronAgentPromptCardHtml(job){
       </div>`;
 }
 
+function _cronTimeLabel(value, zone) {
+  if (!value) return t('not_available');
+  // Naive legacy timestamps are not browser-local instants.
+  if (!/(Z|[+-]\d\d:\d\d)$/.test(value)) return `${value} · ${t('cron_timezone_unknown')}`;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return t('not_available');
+  const local = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  let effective = value;
+  if (zone) {
+    try { effective = `${date.toLocaleString(undefined, {timeZone:zone})} (${zone})`; } catch (_) { /* retain authoritative offset */ }
+  }
+  return effective + (zone !== local ? ` · ${t('cron_your_time')}: ${date.toLocaleString()} (${local})` : '');
+}
 function _renderCronDetail(job){
   _currentCronDetail = job;
   _currentCronDetailKey = _cronJobKey(job);
@@ -1232,8 +1326,8 @@ function _renderCronDetail(job){
   if (!title || !body) return;
   title.textContent = job.name || job.schedule_display || '(unnamed)';
   const status = _cronStatusMeta(job);
-  const nextRun = job.next_run_at ? new Date(job.next_run_at).toLocaleString() : t('not_available');
-  const lastRun = job.last_run_at ? new Date(job.last_run_at).toLocaleString() : t('never');
+  const nextRun = _cronTimeLabel(job.next_run_at, job.scheduler_timezone);
+  const lastRun = job.last_run_at ? _cronTimeLabel(job.last_run_at, job.scheduler_timezone) : t('never');
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
@@ -1284,7 +1378,7 @@ function _renderCronDetail(job){
       <div class="detail-card">
         <div class="detail-card-title">${esc(t('cron_status_active').replace(/./,c=>c.toUpperCase()))}</div>
         <div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value"><span class="detail-badge ${status.detailClass}">${esc(status.label)}</span></div></div>
-        <div class="detail-row"><div class="detail-row-label">Schedule</div><div class="detail-row-value"><code>${esc(schedule)}</code></div></div>
+        <div class="detail-row"><div class="detail-row-label">Schedule</div><div class="detail-row-value"><code>${esc(schedule)}</code><div>${esc(t('cron_effective_timezone'))}: ${esc(job.scheduler_timezone || t('cron_timezone_unknown'))}</div></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_next'))}</div><div class="detail-row-value">${esc(nextRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
@@ -1460,7 +1554,9 @@ async function _loadRunContent(jobId, filename, runId){
   }
 }
 
-function openCronDetail(jobOrId, el){
+async function openCronDetail(jobOrId, el, bypassGuard = false) {
+  if (!bypassGuard && !await guardUnsavedEditors('cron')) return false;
+  _editorDrafts.delete('cron');
   const job = _findCronJob(jobOrId);
   if (!job) return;
   const detailKey = _cronJobKey(job);
@@ -1507,7 +1603,9 @@ function editCurrentCron(){
   if (!_currentCronDetail) return;
   openCronEdit(_currentCronDetail);
 }
-function duplicateCurrentCron(){
+async function duplicateCurrentCron(bypassGuard = false) {
+  if (!bypassGuard && !await guardUnsavedEditors('cron')) return false;
+  _editorDrafts.delete('cron');
   if (!_currentCronDetail) return;
   const job = _currentCronDetail;
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
@@ -1565,7 +1663,9 @@ let _cronSkillsCache=null;
 let _cronProfilesCache=null;
 let _cronDeliveryOptionsCache=null;
 
-function openCronCreate(){
+async function openCronCreate(bypassGuard = false) {
+  if (!bypassGuard && !await guardUnsavedEditors('cron')) return false;
+  _editorDrafts.delete('cron');
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
   _cronPreFormDetail = _currentCronDetail ? { ..._currentCronDetail } : null;
   _editingCronId = null;
@@ -1575,14 +1675,16 @@ function openCronCreate(){
   _renderCronForm({ name:'', schedule:'0 9 * * *', prompt:'', deliver:'local', profile:'', toast_notifications:true, model:'', provider:'', isEdit:false });
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
-  loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
+  // Profile options come from the cache populated by loadCrons; never replace a live selection.
   // Mobile: the cron form lives in the main view, which is covered by the
   // full-screen sidebar drawer. Close the drawer so the form is visible (mirror
   // openCronDetail's behaviour); no-op on desktop.
   _closeMobileSidebarAfterPanelSelection();
 }
 
-function openCronEdit(job){
+async function openCronEdit(job, bypassGuard = false) {
+  if (!bypassGuard && !await guardUnsavedEditors('cron')) return false;
+  _editorDrafts.delete('cron');
   if (!job) return;
   _cronPreFormDetail = { ...job };
   _editingCronId = job.id;
@@ -1606,7 +1708,7 @@ function openCronEdit(job){
   } else {
     _bindCronSkillPicker();
   }
-  loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
+
 }
 
 function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', model='', provider='', isEdit }){
@@ -1679,7 +1781,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
                 <span class="cron-schedule-preset-conj" aria-hidden="true">${esc(t('cron_schedule_conj_at_minute') || 'at minute')}</span>
                 <input type="number" id="cronFormScheduleMinute" min="0" max="59" step="1" value="0" autocomplete="off" aria-label="${esc(t('cron_schedule_minute_label') || 'Minute')}">
               </div>
-              <div class="detail-form-hint cron-schedule-preset-time-hint"><span id="cronFormSchedulePreview" class="cron-schedule-preview"></span>${esc(t('cron_schedule_time_hint') || 'Time is server time; cron runs server-side.')}</div>
+              <div class="detail-form-hint cron-schedule-preset-time-hint"><span id="cronFormSchedulePreview" class="cron-schedule-preview"></span>${esc(t('cron_effective_timezone'))}: ${esc(_cronPreFormDetail?.scheduler_timezone || t('cron_timezone_unknown'))}. ${esc(t('cron_preview_after_save'))}</div>
             </div>
           </div>
         </div>
@@ -1725,10 +1827,12 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   body.style.display = '';
   if (empty) empty.style.display = 'none';
   _setCronHeaderButtons(isEdit ? 'edit' : 'create');
+  _trackEditor('cron', body.querySelector('form'), saveCronForm, () => cancelCronForm(true));
   _populateCronDeliverOptions(deliver, isEdit);
   _populateCronFormModelSelect(model, provider, isNoAgent);
   if (!isNoAgent) _renderCronSkillTags();
   _initCronSchedulePresetControls();
+  _editorLoadedField('cron', $('cronFormSchedule'));
   const focusEl = $('cronFormName');
   if (focusEl) focusEl.focus();
 }
@@ -1762,6 +1866,7 @@ async function _populateCronDeliverOptions(selectedValue, isEdit) {
     sel.innerHTML = '<option value="local">Local (save output only)</option>';
   }
   sel.disabled = false;
+  _editorLoadedField('cron', sel);
 }
 
 async function _populateCronFormModelSelect(selectedModel, selectedProvider, disabled){
@@ -1828,6 +1933,7 @@ async function _populateCronFormModelSelect(selectedModel, selectedProvider, dis
     return;
   }
   sel.disabled = !!disabled;
+  _editorLoadedField('cron', sel);
 }
 
 function _renderCronSkillTags(){
@@ -1877,7 +1983,9 @@ function _bindCronSkillPicker(){
   search.onblur=()=>setTimeout(()=>{dropdown.style.display='none';},150);
 }
 
-function cancelCronForm(){
+async function cancelCronForm(bypassGuard = false) {
+  if (!bypassGuard && !await guardUnsavedEditors('cron')) return false;
+  _editorDrafts.delete('cron');
   _editingCronId = null;
   if (_cronPreFormDetail) {
     const snap = _cronPreFormDetail;
@@ -1922,6 +2030,8 @@ async function saveCronForm(){
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  const ticket = _beginEditorSave('cron');
+  if (!ticket) return false;
   try{
     const modelEl = $('cronFormModel');
     const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
@@ -1945,14 +2055,14 @@ async function saveCronForm(){
         // else: select not yet populated — omit model/provider to preserve saved value
       }
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
+      if (!_acceptEditorSave(ticket)) return false;
       const editedId = _editingCronId;
-      _editingCronId = null;
-      _cronPreFormDetail = null;
       showToast(t('cron_job_updated'));
       await loadCrons();
+      if (!_acceptEditorSave(ticket)) return false;
       const job = _cronList && _cronList.find(j => j.id === editedId);
-      if (job) openCronDetail(job);
-      return;
+      if (job) await openCronDetail(job, null, true);
+      return true;
     }
     const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications};
     if(_cronIsDuplicate) body.enabled=false;
@@ -1971,16 +2081,22 @@ async function saveCronForm(){
       body.provider = _cronPreFormDetail.provider || null;
     }
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
+    // Creation must become an update if the user typed while saving.
+    _editingCronId = res && (res.id || (res.job && res.job.id));
+    if (!_acceptEditorSave(ticket)) return false;
     _cronPreFormDetail = null;
     _cronIsDuplicate = false;
     showToast(t('cron_job_created'));
     await loadCrons();
+    if (!_acceptEditorSave(ticket)) return false;
     const newId = res && (res.id || (res.job && res.job.id));
-    if (newId) openCronDetail(newId);
-    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1]);
+    if (newId) await openCronDetail(newId, null, true);
+    else if (_cronList && _cronList.length) await openCronDetail(_cronList[_cronList.length - 1], null, true);
+    return true;
   }catch(e){
     errEl.textContent=t('error_prefix')+e.message;errEl.style.display='';
-  }
+    return false;
+  } finally { ticket.d.saving = false; }
 }
 
 // Back-compat aliases for any stale callers
@@ -4426,7 +4542,10 @@ function _renderStaticModelHealthTable() {
   return `<details class="insights-card insights-model-health-card"><summary><span class="insights-card-title">${esc(t('insights_model_health_title'))}</span></summary><div class="insights-table insights-model-health-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_health_provider'))}</span><span>${esc(t('insights_model_health_cost_per_m'))}</span><span>${esc(t('insights_model_health_replacement'))}</span></div>${rows}</div></details>`;
 }
 
+let _insightsRequest = 0;
 async function loadInsights(animate) {
+  const request = ++_insightsRequest;
+  const scope = S.activeProfile || 'default';
   const box = $('insightsContent');
   const refreshBtn = $('insightsRefreshBtn');
   if (!box) return;
@@ -4439,8 +4558,9 @@ async function loadInsights(animate) {
     const [data, wikiStatus, skillUsage] = await Promise.all([
       api(`/api/insights?days=${period}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
-      api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
+      _loadSkillUsage(),
     ]);
+    if (request !== _insightsRequest || scope !== (S.activeProfile || 'default')) return;
     _renderInsights(data, box, wikiStatus, skillUsage);
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
@@ -4683,7 +4803,41 @@ function _bucketDailyTokensForChart(rows) {
   return result;
 }
 
-function _renderSkillUsage(d) {
+const _skillUsageCache = new Map();
+let _skillUsageRequest = 0;
+async function _loadSkillUsage() {
+  const scope = S.activeProfile || 'default';
+  const request = ++_skillUsageRequest;
+  const card = $('skillUsageCard');
+  if (card) card.outerHTML = _renderSkillUsage({state:'loading', data:_skillUsageCache.get(scope)});
+  else if ($('insightsContent') && !$('insightsContent').children.length) $('insightsContent').innerHTML = _renderSkillUsage({state:'loading'});
+  try {
+    const data = await api('/api/skills/usage');
+    if (scope !== (S.activeProfile || 'default') || request !== _skillUsageRequest) return {state:'loading'};
+    _skillUsageCache.set(scope, data);
+    return {state:'ready', data};
+  } catch (_) {
+    if (scope !== (S.activeProfile || 'default') || request !== _skillUsageRequest) return {state:'loading'};
+    return {state:'error', data:_skillUsageCache.get(scope)};
+  }
+}
+async function retrySkillUsage() {
+  const scope = S.activeProfile || 'default';
+  const result = await _loadSkillUsage();
+  if (scope !== (S.activeProfile || 'default')) return;
+  const card = $('skillUsageCard');
+  if (card) card.outerHTML = _renderSkillUsage(result);
+}
+function _renderSkillUsage(result) {
+  if (!result || !result.state) return _renderSkillUsageData(result || {});
+  const notice = result.state === 'loading' ? t('loading') : t('skills_usage_failed');
+  const retry = result.state === 'error' ? `<button type="button" class="app-dialog-btn" onclick="retrySkillUsage()">${esc(t('retry'))}</button>` : '';
+  if (result.state === 'ready') return _renderSkillUsageData(result.data);
+  const banner = `<div role="status">${esc(notice)} ${result.data ? esc(t('skills_usage_stale')) : ''} ${retry}</div>`;
+  if (result.data) return _renderSkillUsageData(result.data).replace('<div class="skill-usage-grid"', banner + '<div class="skill-usage-grid"').replace('<div class="insights-empty">', banner + '<div class="insights-empty">');
+  return `<div class="insights-card" id="skillUsageCard"><div class="insights-card-title">${esc(t('insights_skill_usage_title'))}</div>${banner}</div>`;
+}
+function _renderSkillUsageData(d) {
   const usage = d.usage || {};
   const skillNames = d.skill_names || [];
   const totalInvocations = d.total_invocations || 0;
@@ -5053,7 +5207,11 @@ function _setSkillHeaderButtons(mode) {
   else { if (header) header.style.display = 'none';  hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
 }
 
-async function openSkill(name, el) {
+let _skillLoadGeneration = 0;
+async function openSkill(name, el, bypassGuard = false) {
+  if (!bypassGuard && !await guardUnsavedEditors('skill')) return false;
+  _editorDrafts.delete('skill');
+  const generation = ++_skillLoadGeneration;
   // Highlight active skill in the sidebar list
   document.querySelectorAll('.skill-item').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
@@ -5061,6 +5219,7 @@ async function openSkill(name, el) {
   _editingSkillName = null;
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
+    if (generation !== _skillLoadGeneration) return false;
     if (data && (data.success === false || data.error)) {
       const message = data.error || t('skill_load_failed');
       _renderSkillError(name, message);
@@ -5073,9 +5232,13 @@ async function openSkill(name, el) {
   } catch(e) { setStatus(t('skill_load_failed') + e.message); }
 }
 
-async function openSkillFile(skillName, filePath) {
+async function openSkillFile(skillName, filePath, bypassGuard = false) {
+  if (!bypassGuard && !await guardUnsavedEditors('skill')) return false;
+  _editorDrafts.delete('skill');
+  const generation = ++_skillLoadGeneration;
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(skillName)}&file=${encodeURIComponent(filePath)}`);
+    if (generation !== _skillLoadGeneration) return false;
     if (data && data.error) {
       _renderSkillError(skillName, data.error);
       setStatus(t('skill_file_load_failed') + data.error);
@@ -5113,7 +5276,9 @@ async function openSkillFile(skillName, filePath) {
   } catch(e) { setStatus(t('skill_file_load_failed') + e.message); }
 }
 
-function editCurrentSkill() {
+async function editCurrentSkill(bypassGuard = false) {
+  if (!bypassGuard && !await guardUnsavedEditors('skill')) return false;
+  _editorDrafts.delete('skill');
   if (!_currentSkillDetail) return;
   const s = _currentSkillDetail;
   let category = '';
@@ -5127,7 +5292,9 @@ function editCurrentSkill() {
   _renderSkillForm({ name: s.name, category, content: s.content || '', isEdit: true });
 }
 
-function openSkillCreate() {
+async function openSkillCreate(bypassGuard = false) {
+  if (!bypassGuard && !await guardUnsavedEditors('skill')) return false;
+  _editorDrafts.delete('skill');
   if (typeof switchPanel === 'function' && _currentPanel !== 'skills') switchPanel('skills');
   _skillPreFormDetail = _currentSkillDetail ? { ..._currentSkillDetail } : null;
   _editingSkillName = null;
@@ -5140,6 +5307,7 @@ function openSkillCreate() {
 }
 
 function _renderSkillForm({ name, category, content, isEdit }) {
+  ++_skillLoadGeneration;
   const title = $('skillDetailTitle');
   const body = $('skillDetailBody');
   const empty = $('skillDetailEmpty');
@@ -5169,11 +5337,14 @@ function _renderSkillForm({ name, category, content, isEdit }) {
   body.style.display = '';
   if (empty) empty.style.display = 'none';
   _setSkillHeaderButtons(isEdit ? 'edit' : 'create');
+  _trackEditor('skill', body.querySelector('form'), saveSkillForm, () => cancelSkillForm(true));
   const focusEl = isEdit ? $('skillFormCategory') : $('skillFormName');
   if (focusEl) focusEl.focus();
 }
 
-function cancelSkillForm() {
+async function cancelSkillForm(bypassGuard = false) {
+  if (!bypassGuard && !await guardUnsavedEditors('skill')) return false;
+  _editorDrafts.delete('skill');
   _editingSkillName = null;
   if (_skillPreFormDetail) {
     const snap = _skillPreFormDetail;
@@ -5207,15 +5378,19 @@ async function saveSkillForm() {
   errEl.style.display = 'none';
   if (!name) { errEl.textContent = t('skill_name_required'); errEl.style.display = ''; return; }
   if (!content.trim()) { errEl.textContent = t('content_required'); errEl.style.display = ''; return; }
+  const ticket = _beginEditorSave('skill');
+  if (!ticket) return false;
   try {
     await api('/api/skills/save', {method:'POST', body: JSON.stringify({name, category: category||undefined, content})});
+    _skillPreFormDetail = {name, content, linked_files:_currentSkillDetail?.linked_files || {}};
+    if (!_acceptEditorSave(ticket)) return false;
     showToast(_editingSkillName ? t('skill_updated') : t('skill_created'));
     _skillsData = null;
     _cronSkillsCache = null;
     if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     _editingSkillName = null;
-    _skillPreFormDetail = null;
     await loadSkills();
+    if (!_acceptEditorSave(ticket)) return false;
     // Reload the saved skill in read mode with fresh content
     const row = document.querySelector(`.skill-item .skill-name`);
     const match = document.querySelectorAll('.skill-item');
@@ -5224,8 +5399,10 @@ async function saveSkillForm() {
       const nm = el.querySelector('.skill-name');
       if (nm && nm.textContent === name) targetEl = el;
     });
-    await openSkill(name, targetEl);
-  } catch(e) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
+    await openSkill(name, targetEl, true);
+    return true;
+  } catch(e) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; return false; }
+  finally { ticket.d.saving = false; }
 }
 
 // Back-compat aliases (delete flow + any old callers)
@@ -6389,6 +6566,7 @@ async function promptWorkspacePath(){
 }
 
 async function switchToWorkspace(path,name){
+  if (!await guardUnsavedEditors()) return false;
   // Opus review Q6: if called from blank page, auto-create a session bound to
   // the requested workspace so the switch doesn't silently no-op.
   if(!S.session){
