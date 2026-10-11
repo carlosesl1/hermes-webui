@@ -797,60 +797,91 @@ function _micToastKeyForRecognitionError(error){
   }
   window._applyDictationAppendPreference=_applyDictationAppendPreference;
 
-  async function _sendRawAudio(blob){
+  // Audio belongs to a capture, never to the current global composer. Keep
+  // recoverable bytes per profile/session; generation gates automatic apply.
+  const _recordings=new Map();
+  let _capture=null;
+  let _draftRevision=0;
+  let _voiceOwnerTimer=null;
+  let _recoveryView=null;
+  let _recoveryBusy=false;
+  ta.addEventListener('input',()=>{ _draftRevision++; });
+
+  function _voiceOwner(){
+    return {
+      sid:S.session?.session_id||null,
+      profile:S.activeProfile||'default',
+      generation:typeof _loadSessionGeneration==='undefined'?null:_loadSessionGeneration,
+      profileGeneration:typeof _profileSwitchGeneration==='undefined'?null:_profileSwitchGeneration,
+    };
+  }
+  function _voiceOwnerKey(owner){ return JSON.stringify([owner.profile,owner.sid]); }
+  function _sameVoiceOwner(owner){ return _voiceOwnerKey(owner)===_voiceOwnerKey(_voiceOwner()); }
+  function _sameVoiceView(owner){
+    const now=_voiceOwner();
+    return _sameVoiceOwner(owner)&&owner.generation===now.generation
+      &&owner.profileGeneration===now.profileGeneration;
+  }
+  function _voiceDraft(){
+    return {owner:_voiceOwner(),text:ta.value,revision:_draftRevision,files:[...S.pendingFiles]};
+  }
+  function _sameVoiceDraft(draft){
+    return _sameVoiceView(draft.owner)&&draft.revision===_draftRevision&&draft.text===ta.value
+      &&draft.files.length===S.pendingFiles.length
+      &&draft.files.every((file,index)=>file===S.pendingFiles[index]);
+  }
+  function _ownsRecording(job){ return _recordings.get(_voiceOwnerKey(job.owner))===job; }
+  function _forgetRecording(job){
+    if(_ownsRecording(job)) _recordings.delete(_voiceOwnerKey(job.owner));
+    _renderRecordingRecovery();
+  }
+  function _watchVoiceOwner(){
+    if(_voiceOwnerTimer) return;
+    // No navigation monkey-patching: stop a departed capture, and re-present
+    // recovery on return. Every action also validates synchronously, so this
+    // display refresh is not the security/correctness boundary.
+    _voiceOwnerTimer=setInterval(()=>{
+      if(_capture&&!_sameVoiceView(_capture.owner)&&window._micActive){
+        window._micPendingSend=false;
+        _stopMic();
+      }
+      _renderRecordingRecovery();
+      if(!_recordings.size&&!_capture){
+        clearInterval(_voiceOwnerTimer);
+        _voiceOwnerTimer=null;
+      }
+    },250);
+  }
+  function _appendVoiceText(base,text){
+    return base?(base.endsWith(' ')||base.endsWith('\n')?base+text:base+' '+text):text;
+  }
+  function _commitTranscript(job,explicitRecovery=false){
+    if(!_ownsRecording(job)||!_sameVoiceOwner(job.owner)) return false;
+    if(!explicitRecovery&&!_sameVoiceDraft(job.attempt)) return false;
+    const shouldSend=!explicitRecovery&&job.sendRequested;
+    // An explicit recovery inserts into the current draft, never replaces it.
+    ta.value=(explicitRecovery||job.append)?_appendVoiceText(ta.value,job.transcript):job.transcript;
+    autoResize();
+    ta.dispatchEvent(new Event('input',{bubbles:true}));
+    _forgetRecording(job);
+    if(shouldSend) send();
+    return true;
+  }
+  function _sendRawAudio(job,explicitRecovery=false){
+    if(!_ownsRecording(job)||!_sameVoiceOwner(job.owner)
+        ||(!explicitRecovery&&!_sameVoiceDraft(job.attempt))){
+      job.sendRequested=false;
+      _renderRecordingRecovery();
+      return;
+    }
+    const blob=job.blob;
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
     S.pendingFiles.push(file);
     renderTray();
-    // Stop always prepares an attachment for review, regardless of draft text.
-    // Only an explicit Send-button click while recording authorizes sending.
-    if(window._micPendingSend){
-      window._micPendingSend=false;
-      send();
-    }else{
-      showToast(t('voice_raw_attached'));
-    }
-  }
-
-  function _commitTranscript(text, prefixOverride){
-    // `prefixOverride` is the composer content captured at recording start,
-    // passed only by the async server-STT path (recorder.onstop → _transcribeBlob).
-    // The sync browser-SR path doesn't call this function — it commits inline
-    // in sr.onend using _prefix directly.
-    //
-    // Three concerns this function has to balance (Greptile reviews):
-    //   1. Race condition: user types during async transcription → preserve those
-    //      keystrokes. Read live ta.value, not the stale snapshot.
-    //   2. Clear-during-transcription: user clears textarea during async wait →
-    //      respect that intent. Live ta.value (even empty) wins over snapshot.
-    //   3. Browser-SR fallback: if a future caller passes no prefixOverride
-    //      and live ta.value is empty, fall back to _prefix as a safety net.
-    //
-    // Resolution: when prefixOverride IS provided (server-STT path), trust live
-    // ta.value unconditionally — even when empty. Otherwise fall back to _prefix.
-    const clean=(text||'').trim();
-    let committed;
-    if(!clean){
-      committed = ta.value;
-    }else if(_dictationAppend){
-      const base = prefixOverride !== undefined ? ta.value : (ta.value || _prefix);
-      if(!base){
-        committed = clean;
-      }else{
-        committed = (!base.endsWith(' ') && !base.endsWith('\n'))
-          ? base+' '+clean.trimStart()
-          : base+clean;
-      }
-    }else{
-      // Replace mode (explicit): dictated text overwrites the composer.
-      committed = clean;
-    }
-    ta.value=committed;
-    autoResize();
-    if(window._micPendingSend){
-      window._micPendingSend=false;
-      send();
-    }
+    _forgetRecording(job);
+    if(!explicitRecovery&&job.sendRequested) send();
+    else showToast(t('voice_raw_attached'));
   }
 
   function _isServerSttUnavailable(err){
@@ -865,36 +896,39 @@ function _micToastKeyForRecognitionError(error){
     return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
   }
 
-  // A failed recording stays here until retry succeeds, it is attached, or the
-  // user explicitly discards it. Do not replace it with a new capture silently.
-  let _failedRecording=null;
-  let _transcriptionBusy=false;
-
-  function _clearRecordingRecovery(){
-    const panel=$('micRecordingRecovery');
-    if(panel) panel.remove();
-    _failedRecording=null;
-  }
-
-  function _showRecordingRecovery(blob, prefixSnapshot){
-    _clearRecordingRecovery();
-    _failedRecording={blob,prefixSnapshot};
+  function _renderRecordingRecovery(){
+    const job=_recordings.get(_voiceOwnerKey(_voiceOwner()));
+    const visible=job&&(job.blob||job.transcript)?job:null;
+    const busy=!!visible?.busy;
+    if(_recoveryView===visible&&_recoveryBusy===busy) return;
+    $('micRecordingRecovery')?.remove();
+    _recoveryView=visible;
+    _recoveryBusy=busy;
+    if(!visible) return;
     const panel=document.createElement('div');
     panel.id='micRecordingRecovery';
     panel.setAttribute('role','group');
     panel.setAttribute('aria-label',t('voice_recording_saved'));
     const message=document.createElement('p');
     message.setAttribute('role','status');
-    message.textContent=t('voice_recording_saved');
+    message.textContent=t(busy?'voice_transcribing':'voice_recording_saved');
     panel.appendChild(message);
+    if(busy){ta.parentElement.insertBefore(panel,ta);return;}
+    if(job.transcript){
+      const preview=document.createElement('p');
+      preview.textContent=job.transcript;
+      panel.appendChild(preview);
+    }
     const actions=[
-      ['micRetryTranscription','voice_retry_transcription',()=>_transcribeBlob(blob,prefixSnapshot)],
-      ['micAttachRecording','voice_attach_recording',()=>{
-        window._micPendingSend=false;
-        _clearRecordingRecovery();
-        void _sendRawAudio(blob);
-      }],
-      ['micDiscardRecording','voice_discard_recording',()=>_clearRecordingRecovery()],
+      job.transcript
+        ? ['micApplyTranscript','voice_insert_transcript',()=>_commitTranscript(job,true)]
+        : ['micRetryTranscription','voice_retry_transcription',()=>{
+          job.sendRequested=false;
+          job.attempt=_voiceDraft();
+          void _transcribeBlob(job);
+        }],
+      ...(job.blob?[['micAttachRecording','voice_attach_recording',()=>_sendRawAudio(job,true)]]:[]),
+      ['micDiscardRecording','voice_discard_recording',()=>_forgetRecording(job)],
     ];
     for(const [id,key,action] of actions){
       const button=document.createElement('button');
@@ -902,50 +936,65 @@ function _micToastKeyForRecognitionError(error){
       button.id=id;
       button.className='btn btn-sm';
       button.textContent=t(key);
-      button.onclick=()=>{if(!_transcriptionBusy) action();};
+      button.onclick=()=>{
+        if(_ownsRecording(job)&&_sameVoiceOwner(job.owner)&&!job.busy) action();
+        else _renderRecordingRecovery();
+      };
       panel.appendChild(button);
     }
     ta.parentElement.insertBefore(panel,ta);
   }
 
-  async function _transcribeBlob(blob, prefixSnapshot){
-    if(_transcriptionBusy) return;
-    _transcriptionBusy=true;
-    const panel=$('micRecordingRecovery');
-    if(panel) panel.querySelectorAll('button').forEach(button=>button.disabled=true);
+  async function _transcribeBlob(job){
+    if(job.busy||!_ownsRecording(job)) return;
+    if(!_sameVoiceView(job.attempt.owner)){
+      job.sendRequested=false;
+      _renderRecordingRecovery();
+      return;
+    }
+    job.busy=true;
+    _renderRecordingRecovery();
+    const blob=job.blob;
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
-    // Snapshot is passed in from the recorder.onstop handler — taken there
-    // BEFORE _setRecording(false) clears _prefix (async server STT path).
-    setComposerStatus('Transcribing…');
+    const controller=new AbortController();
+    let timeout;
+    // A stalled fetch/body must not lock recovery indefinitely. Promise.race
+    // also fences late results from a transport that ignores abort.
+    const deadline=new Promise((_,reject)=>{
+      timeout=setTimeout(()=>{controller.abort();reject(new Error(t('mic_network')));},60000);
+    });
     try{
-      const res=await fetch('api/transcribe',{method:'POST',body:form});
-      const data=await res.json().catch(()=>({}));
-      if(!res.ok){
-        const err=new Error(data.error||'Transcription failed');
-        err.status=res.status;
-        throw err;
-      }
+      const data=await Promise.race([(async()=>{
+        const res=await fetch('api/transcribe',{method:'POST',body:form,signal:controller.signal});
+        const data=await res.json().catch(()=>({}));
+        if(!res.ok){
+          const err=new Error(data.error||'Transcription failed');
+          err.status=res.status;
+          throw err;
+        }
+        return data;
+      })(),deadline]);
       if(!String(data.transcript||'').trim()) throw new Error(t('voice_transcription_empty'));
-      _clearRecordingRecovery();
-      _commitTranscript(data.transcript, prefixSnapshot);
+      job.transcript=String(data.transcript).trim();
+      if(!_commitTranscript(job)) job.sendRequested=false;
     }catch(err){
-      window._micPendingSend=false;
-      _showRecordingRecovery(blob,prefixSnapshot);
-      if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
-        window._micPendingSend=false;
-        localStorage.setItem(_micForceMediaRecorderKey,'0');
-        _forceMediaRecorder=false;
-        recognition=_ensureSpeechRecognition();
+      job.sendRequested=false;
+      // Background failures retain bytes without altering another chat's UI
+      // or capture backend. A retry is a new, review-only draft attempt.
+      if(_sameVoiceView(job.attempt.owner)){
+        if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()&&!window._micActive){
+          localStorage.setItem(_micForceMediaRecorderKey,'0');
+          _forceMediaRecorder=false;
+          recognition=_ensureSpeechRecognition();
+        }
         showToast(err.message||t('mic_network'));
-        return;
       }
-      window._micPendingSend=false;
-      showToast(err.message||t('mic_network'));
     }finally{
-      _transcriptionBusy=false;
-      setComposerStatus('');
+      clearTimeout(timeout);
+      job.busy=false;
+      _renderRecordingRecovery();
     }
   }
 
@@ -1032,6 +1081,13 @@ function _micToastKeyForRecognitionError(error){
     _micStartSeq+=1;
     _isRecording=false;
     if(!window._micActive) return;
+    // Consume the global click flag synchronously; async handlers only use
+    // this capture's intention and exact click-time draft snapshot.
+    if(_capture){
+      _capture.sendRequested=!!window._micPendingSend&&_sameVoiceView(_capture.owner);
+      if(_capture.sendRequested) _capture.attempt=_voiceDraft();
+    }
+    window._micPendingSend=false;
     // Stop the backend that was ACTIVE WHEN RECORDING STARTED — not whatever
     // _rawAudioMode says now. The user can toggle Settings → Sound mid-recording,
     // which would otherwise make us stop the wrong backend and orphan the other
@@ -1050,18 +1106,19 @@ function _micToastKeyForRecognitionError(error){
   }
   window._stopMic=_stopMic; // expose for send-guard above
 
-  function _ensureSpeechRecognition(){
+  function _ensureSpeechRecognition(job=null){
     if(!SpeechRecognition) return null;
-    const sr=recognition||new SpeechRecognition();
+    const sr=new SpeechRecognition();
     // Desktop dictation stays one-shot (single utterance); mobile / opt-in
     // devices run continuous so a natural pause doesn't end the session (#5294).
     sr.continuous=_micDictationContinuous();
     sr.interimResults=true;
     sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
-    sr.onstart=()=>{ _finalText=''; };
+    sr.onstart=()=>{ if(_capture===job) _finalText=''; };
 
     sr.onresult=(event)=>{
+      if(!job||_capture!==job) return;
       // #5294: a real result means the continuity restarts are PRODUCTIVE, not a
       // stolen-audio-session tight loop — reset the restart budget so a long
       // dictation with many natural pauses isn't silently capped at
@@ -1076,23 +1133,41 @@ function _micToastKeyForRecognitionError(error){
         if(event.results[i].isFinal){ final+=t; _finalText=final; }
         else{ interim+=t; }
       }
+      if(!_sameVoiceDraft(job.attempt)){
+        job.sendRequested=false;
+        window._micPendingSend=false;
+        _stopMic();
+        return;
+      }
       ta.value=_prefix+(final||interim);
+      job.attempt=_voiceDraft();
       autoResize();
     };
 
     sr.onend=()=>{
+      if(!job||_capture!==job) return;
+      const canApply=_sameVoiceDraft(job.attempt);
+      const shouldSend=canApply&&job.sendRequested;
+      const spoken=_finalText;
       const committed=_finalText
         ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
             ? _prefix+' '+_finalText.trimStart()
             : _prefix+_finalText)
         : ta.value;
-      ta.value=committed;
-      autoResize();
+      if(canApply){
+        ta.value=committed;
+        job.attempt=_voiceDraft();
+        autoResize();
+      }else if(spoken){
+        job.transcript=spoken.trim();
+        job.sendRequested=false;
+        _recordings.set(_voiceOwnerKey(job.owner),job);
+      }
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
       // the user is still dictating, so restart to keep the session alive. Desktop
       // (one-shot) and intentional stops (_speechStopRequested) skip this and
       // finalize. Bounded by _micMaxRestarts so a stolen audio session can't loop.
-      if(_micShouldRestartDictation()){
+      if(canApply&&_micShouldRestartDictation()){
         _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
           ? committed+' '
           : committed;
@@ -1112,14 +1187,15 @@ function _micToastKeyForRecognitionError(error){
       _micRestartCount=0;
       void _releaseMicWakeLock();
       _setRecording(false);
-      if(window._micPendingSend){
-        window._micPendingSend=false;
-        send();
-      }
+      _capture=null;
+      _renderRecordingRecovery();
+      if(shouldSend) send();
       _applyDeferredServerSttFlip();
     };
 
     sr.onerror=(event)=>{
+      if(!job||_capture!==job) return;
+      job.sendRequested=false;
       // While dictating with continuity on, a no-speech/aborted error is a normal
       // pause or transient audio-session hiccup — swallow it and let onend restart
       // (bounded by _micMaxRestarts). Desktop one-shot still surfaces the toast.
@@ -1132,6 +1208,7 @@ function _micToastKeyForRecognitionError(error){
         return;
       }
       _speechStopRequested=false;
+      _capture=null;
       _setRecording(false);
       window._micPendingSend=false;
       _isRecording=false;
@@ -1211,8 +1288,9 @@ function _micToastKeyForRecognitionError(error){
   }
 
   async function _startMicCapture(holdRequired=false){
-    if(!_micButtonAvailable()||_transcriptionBusy) return;
-    if(_failedRecording){
+    if(!_micButtonAvailable()) return;
+    _renderRecordingRecovery();
+    if(_recordings.has(_voiceOwnerKey(_voiceOwner()))&&!_capture){
       const retry=$('micRetryTranscription');
       if(retry) retry.focus();
       return;
@@ -1231,13 +1309,19 @@ function _micToastKeyForRecognitionError(error){
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
+    const captureJob={owner:_voiceOwner(),attempt:_voiceDraft(),append:_dictationAppend,sendRequested:false,blob:null,busy:false,transcript:''};
+    _capture=captureJob;
+    window._micPendingSend=false;
+    _watchVoiceOwner();
     if(_micOriginNeedsSecureContext()){
       _isRecording=false;
+      _capture=null;
       window._micPendingSend=false;
       showToast(t('mic_insecure_origin'));
       return;
     }
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
+      recognition=_ensureSpeechRecognition(captureJob);
       _activeCaptureMode='speech';
       _speechStopRequested=false;
       _micRestartCount=0;
@@ -1251,14 +1335,15 @@ function _micToastKeyForRecognitionError(error){
       return;
     }
     if(!_canRecordAudio){
+      _capture=null;
       _isRecording=false;
       showToast(t('mic_network'));
       return;
     }
     try{
       const captureStream=await navigator.mediaDevices.getUserMedia({audio:true});
-      if(startSeq!==_micStartSeq||!_micButtonAvailable()||(holdRequired&&!_micHoldActive)){
-        _isRecording=false;
+      if(startSeq!==_micStartSeq||!_sameVoiceView(captureJob.owner)||!_micButtonAvailable()||(holdRequired&&!_micHoldActive)){
+        if(_capture===captureJob){_isRecording=false;_capture=null;}
         _stopTracks(captureStream);
         return;
       }
@@ -1272,35 +1357,31 @@ function _micToastKeyForRecognitionError(error){
       recorder.ondataavailable=e=>{if(e.data&&e.data.size)captureChunks.push(e.data);};
       recorder.onerror=()=>{
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
-        _isRecording=false;
+        if(isCurrentCapture) _isRecording=false;
+        if(_capture===captureJob) _capture=null;
+        captureJob.sendRequested=false;
         if(mediaRecorder===recorder) mediaRecorder=null;
         if(isCurrentCapture) _setRecording(false);
-        window._micPendingSend=false;
+        if(isCurrentCapture) window._micPendingSend=false;
         _stopTracks(captureStream);
         showToast(t('mic_network'));
       };
       recorder.onstop=async()=>{
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
         if(mediaRecorder===recorder) mediaRecorder=null;
-        _isRecording=false;
-        // Capture the composer prefix BEFORE _setRecording(false) clears _prefix.
-        // The await on _transcribeBlob runs after this sync block, so by the
-        // time _transcribeBlob is called, _prefix is already ''. Passing the
-        // snapshot through keeps append-mode working on the async server-STT
-        // path. See _commitTranscript() for how the snapshot is consumed.
-        const prefixSnapshot = _prefix;
+        if(isCurrentCapture) _isRecording=false;
+        if(_capture===captureJob) _capture=null;
         const blob=new Blob(captureChunks,{type:recorder.mimeType||mimeType||'audio/webm'});
         if(isCurrentCapture) _setRecording(false);
         _stopTracks(captureStream);
         if(blob.size){
+          captureJob.blob=blob;
+          _recordings.set(_voiceOwnerKey(captureJob.owner),captureJob);
           if(captureMode==='media-raw'){
-            await _sendRawAudio(blob);
+            _sendRawAudio(captureJob);
           }else{
-            await _transcribeBlob(blob, prefixSnapshot);
+            await _transcribeBlob(captureJob);
           }
-        }
-        else if(window._micPendingSend){
-          window._micPendingSend=false;
         }
         _applyDeferredServerSttFlip();
       };
@@ -1310,6 +1391,7 @@ function _micToastKeyForRecognitionError(error){
       _setRecording(true);
     }catch(err){
       if(startSeq!==_micStartSeq) return;
+      if(_capture===captureJob) _capture=null;
       _isRecording=false;
       window._micPendingSend=false;
       _stopTracks();

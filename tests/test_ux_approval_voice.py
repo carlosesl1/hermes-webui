@@ -40,7 +40,8 @@ def browser():
 @pytest.fixture
 def page(browser):
     page = browser.new_page()
-    page.set_default_timeout(1500)
+    page.set_default_timeout(3000)
+    page.on('pageerror', lambda error: print('BROWSER ERROR:', error))
     page.route("**/*", lambda route: route.fulfill(status=200, body="", content_type="text/html"))
     page.goto("https://fixture.invalid/")
     page.set_content(HTML)
@@ -209,3 +210,233 @@ def test_empty_transcription_keeps_recording(page):
     assert page.evaluate('sendCount') == 0
     page.locator('#micDiscardRecording').click()
     assert page.locator('#micRecordingRecovery').count() == 0
+
+# UX08: completion order is controlled at the fetch/recorder boundary, not by
+# sleeps or replacing the real ownership / commit / recovery handlers.
+def defer_stt(page):
+    page.evaluate("""() => {
+      window.sttResolvers=[];
+      window.fetch=async(path, opts)=>{
+        transcriptions.push(await opts.body.get('file').text());
+        return new Promise((resolve,reject)=>sttResolvers.push({resolve,reject}));
+      };
+    }""")
+
+
+def settle_stt(page, text='spoken words', status=200, index=0):
+    page.evaluate("""([text,status,index])=>{
+      const pending=sttResolvers[index];
+      if(!status) pending.reject(new Error('offline'));
+      else pending.resolve({ok:status===200,status,json:async()=>({transcript:text,error:'failed'})});
+    }""", [text,status,index])
+
+
+def navigate_voice(page, sid, text, profile='default'):
+    page.evaluate("""([sid,text,profile])=>{
+      _loadSessionGeneration++; S.activeProfile=profile;
+      S.session={session_id:sid}; S.pendingFiles=[]; $('msg').value=text;
+    }""", [sid,text,profile])
+
+
+@pytest.mark.parametrize('return_before', [False, True])
+@pytest.mark.parametrize('status', [200, 0, 503])
+def test_deferred_voice_owner_a_b_a(page, return_before, status):
+    voice(page, text='draft A')
+    defer_stt(page)
+    page.evaluate('window._micPendingSend=true;window._stopMic()')
+    page.wait_for_function('sttResolvers.length===1')
+    navigate_voice(page, 'b', 'draft B')
+    if return_before:
+        navigate_voice(page, 'a', 'draft A')
+    settle_stt(page, status=status)
+    page.wait_for_timeout(300)
+    assert page.evaluate('sendCount') == 0
+    assert page.locator('#msg').input_value() == ('draft A' if return_before else 'draft B')
+    assert page.evaluate('S.pendingFiles.length') == 0
+    if not return_before:
+        assert page.locator('#micRecordingRecovery').count() == 0
+        navigate_voice(page, 'a', 'draft A')
+    page.wait_for_selector('#micRecordingRecovery', state='visible')
+    page.locator('#micAttachRecording').click()
+    assert page.evaluate('S.pendingFiles[0].text()') == 'same recording'
+    assert page.evaluate('sendCount') == 0
+
+
+@pytest.mark.parametrize('text', ['new typing', '', 'draft'])
+@pytest.mark.parametrize('append', [True, False])
+def test_deferred_voice_keeps_changed_draft_and_revokes_send(page, text, append):
+    voice(page, text='draft')
+    page.evaluate('flag=>window._applyDictationAppendPreference(flag)', append)
+    defer_stt(page)
+    page.evaluate('window._micPendingSend=true;window._stopMic()')
+    page.wait_for_function('sttResolvers.length===1')
+    page.locator('#msg').fill('temporary edit')
+    page.locator('#msg').fill(text)
+    settle_stt(page)
+    page.wait_for_selector('#micRecordingRecovery', state='visible')
+    assert page.locator('#msg').input_value() == text
+    assert page.evaluate('sendCount') == 0
+    page.locator('#micApplyTranscript').click()
+    assert page.locator('#msg').input_value() == (text + ' ' if text else '') + 'spoken words'
+    assert page.evaluate('sendCount') == 0
+
+
+def test_retry_has_its_own_owner_and_draft_snapshot(page):
+    voice(page, text='draft A')
+    defer_stt(page)
+    page.evaluate('window._stopMic()')
+    page.wait_for_function('sttResolvers.length===1')
+    settle_stt(page, status=0)
+    page.wait_for_selector('#micRetryTranscription')
+    page.evaluate("() => {window.staleAttach=$('micAttachRecording').onclick;}")
+    navigate_voice(page, 'b', 'draft B')
+    page.evaluate('staleAttach()')
+    assert page.evaluate('S.pendingFiles.length') == 0
+    navigate_voice(page, 'a', 'fresh A')
+    page.wait_for_selector('#micRetryTranscription', state='visible')
+    page.locator('#micRetryTranscription').click()
+    page.wait_for_function('sttResolvers.length===2')
+    navigate_voice(page, 'b', 'fresh B')
+    settle_stt(page, index=1)
+    page.wait_for_timeout(300)
+    assert page.locator('#msg').input_value() == 'fresh B'
+    assert page.evaluate('transcriptions') == ['same recording', 'same recording']
+    assert page.evaluate('sendCount') == 0
+    navigate_voice(page, 'a', 'fresh A')
+    page.wait_for_selector('#micApplyTranscript', state='visible')
+    page.locator('#micApplyTranscript').click()
+    assert page.locator('#msg').input_value() == 'fresh A spoken words'
+
+
+def test_profile_and_pending_permission_are_owned(page):
+    page.evaluate("""() => {
+      navigator.mediaDevices.getUserMedia=()=>new Promise(resolve=>window.grantMic=resolve);
+      localStorage.setItem('hermes-raw-audio-mode','true');
+    }""")
+    page.add_script_tag(content=VOICE)
+    page.evaluate('void window._toggleMicCapture()')
+    navigate_voice(page, 'a', 'other profile', profile='work')
+    page.evaluate('grantMic({getTracks:()=>[{stop:()=>trackStops++}]})')
+    page.wait_for_function('trackStops===1')
+    assert not page.evaluate('!!window._micActive')
+    assert page.evaluate('S.pendingFiles.length') == 0
+
+
+@pytest.mark.parametrize('explicit_send', [False, True])
+def test_deferred_raw_stop_is_owned(page, explicit_send):
+    page.evaluate("""() => {
+      MediaRecorder.prototype.stop=function(){this.state='inactive';window.finishRaw=()=>{
+        this.ondataavailable({data:new Blob(['same recording'],{type:this.mimeType})});this.onstop();
+      };};
+    }""")
+    voice(page, raw=True, text='draft A')
+    page.evaluate('flag=>{window._micPendingSend=flag;window._stopMic()}', explicit_send)
+    navigate_voice(page, 'b', 'draft B')
+    page.evaluate('finishRaw()')
+    assert page.evaluate('S.pendingFiles.length') == 0
+    assert page.evaluate('sendCount') == 0
+    navigate_voice(page, 'a', 'draft A')
+    page.wait_for_selector('#micAttachRecording', state='visible')
+    page.locator('#micAttachRecording').click()
+    assert page.evaluate('S.pendingFiles[0].text()') == 'same recording'
+    assert page.evaluate('sendCount') == 0
+
+
+def test_deferred_explicit_send_unchanged_draft(page):
+    voice(page, text='draft')
+    defer_stt(page)
+    page.evaluate('window._micPendingSend=true;window._stopMic()')
+    page.wait_for_function('sttResolvers.length===1')
+    settle_stt(page)
+    page.wait_for_function('sendCount===1')
+    assert page.locator('#msg').input_value() == 'draft spoken words'
+
+
+
+def test_timeout_releases_recovery_and_ignores_late_attempt(page):
+    page.clock.install()
+    voice(page, text='draft')
+    defer_stt(page)
+    page.evaluate('window._micPendingSend=true;window._stopMic()')
+    page.wait_for_function('sttResolvers.length===1')
+    page.clock.fast_forward(60001)
+    page.wait_for_selector('#micRetryTranscription')
+    page.locator('#micRetryTranscription').click()
+    page.wait_for_function('sttResolvers.length===2')
+    settle_stt(page, text='late obsolete', index=0)
+    assert page.locator('#msg').input_value() == 'draft'
+    settle_stt(page, index=1)
+    page.wait_for_function("$('msg').value==='draft spoken words'")
+    assert page.evaluate('sendCount') == 0
+    assert page.evaluate('transcriptions') == ['same recording', 'same recording']
+
+
+def test_background_stt_does_not_consume_new_recording_send(page):
+    voice(page, text='draft A')
+    defer_stt(page)
+    page.evaluate('window._micPendingSend=true;window._stopMic()')
+    page.wait_for_function('sttResolvers.length===1')
+    navigate_voice(page, 'b', 'draft B')
+    page.evaluate('window._toggleMicCapture()')
+    assert page.evaluate('window._micActive')
+    settle_stt(page, text='A voice')
+    page.wait_for_timeout(300)
+    assert page.locator('#msg').input_value() == 'draft B'
+    assert page.evaluate('sendCount') == 0
+    page.evaluate('window._micPendingSend=true;window._stopMic()')
+    page.wait_for_function('sttResolvers.length===2')
+    settle_stt(page, text='B voice', index=1)
+    page.wait_for_function('sendCount===1')
+    assert page.locator('#msg').input_value() == 'draft B B voice'
+    navigate_voice(page, 'a', 'draft A')
+    page.wait_for_selector('#micApplyTranscript')
+    page.locator('#micApplyTranscript').click()
+    assert page.locator('#msg').input_value() == 'draft A A voice'
+    assert page.evaluate('sendCount') == 1
+
+
+def test_same_session_id_different_profile_is_not_owner(page):
+    voice(page, text='draft')
+    defer_stt(page)
+    page.evaluate('window._micPendingSend=true;window._stopMic()')
+    page.wait_for_function('sttResolvers.length===1')
+    navigate_voice(page, 'a', 'work draft', profile='work')
+    settle_stt(page)
+    page.wait_for_timeout(300)
+    assert page.locator('#msg').input_value() == 'work draft'
+    assert page.evaluate('sendCount') == 0
+    assert page.locator('#micRecordingRecovery').count() == 0
+    navigate_voice(page, 'a', 'draft')
+    page.wait_for_selector('#micAttachRecording')
+    page.locator('#micAttachRecording').click()
+    assert page.evaluate('S.pendingFiles[0].text()') == 'same recording'
+
+
+@pytest.mark.parametrize('change', ['none', 'navigate', 'edit'])
+def test_browser_speech_stop_retains_owner_and_send_snapshot(page, change):
+    page.evaluate("""() => {
+      localStorage.setItem('mic_force_mediarecorder','0');
+      window.SpeechRecognition=class {
+        constructor(){window.sr=this;}
+        start(){this.onstart();}
+        stop(){window.finishSpeech=()=>this.onend();}
+      };
+    }""")
+    voice(page, text='draft')
+    page.evaluate("""() => {
+      const result=[{transcript:'spoken words'}];result.isFinal=true;
+      sr.onresult({resultIndex:0,results:[result]});
+      window._micPendingSend=true;window._stopMic();
+    }""")
+    if change == 'navigate':
+        navigate_voice(page, 'b', 'other draft')
+    elif change == 'edit':
+        page.locator('#msg').fill('other draft')
+    page.evaluate('finishSpeech()')
+    assert page.evaluate('sendCount') == int(change == 'none')
+    assert page.locator('#msg').input_value() == ('draft spoken words' if change == 'none' else 'other draft')
+    if change == 'navigate':
+        navigate_voice(page, 'a', 'draft')
+    if change != 'none':
+        page.wait_for_selector('#micApplyTranscript')
+        assert page.locator('#micAttachRecording').count() == 0
