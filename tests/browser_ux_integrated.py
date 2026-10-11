@@ -135,8 +135,13 @@ def main(args):
               'command': [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
               'environment': {k: os.environ.get(k) for k in ['HOME','HERMES_HOME','HERMES_WEBUI_STATE_DIR','HERMES_WEBUI_AGENT_DIR','PYTHONPATH']},
               'source': {}, 'checks': [], 'viewports': [], 'teardown': {}}
-    report['head'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    report['git_status_before'] = subprocess.check_output(['git', 'status', '--short'], cwd=ROOT, text=True)
+    # Source archives intentionally have no .git; hashes below are still evidence.
+    for key, command in [('head', ['rev-parse', 'HEAD']), ('git_status_before', ['status', '--short'])]:
+        try:
+            result = subprocess.run(['git', *command], cwd=ROOT, text=True, capture_output=True, check=False)
+            report[key] = result.stdout.strip() if result.returncode == 0 else None
+        except FileNotFoundError:
+            report[key] = None
     for path in (ROOT / 'static').glob('*'):
         if path.is_file() and path.suffix in ('.js', '.html', '.css'):
             report['source'][str(path.relative_to(ROOT))] = hashlib.sha256(path.read_bytes()).hexdigest()
