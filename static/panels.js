@@ -27,6 +27,10 @@ let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
 let _showAllCronProfiles = false;
 let _cronOtherProfileCount = 0;
+let _cronSchedulerMetadata = null;
+let _cronListSequence = 0;
+let _cronPreviewSequence = 0;
+let _cronPreviewTimer = null;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
@@ -586,8 +590,70 @@ function _syncCronScheduleWarning() {
   const input = $('cronFormSchedule');
   const warning = $('cronFormScheduleOnceWarning');
   if (!input || !warning) return;
-  warning.style.display = _cronScheduleKindForInput(input.value) === 'once' ? '' : 'none';
+  // Schedule kind, including bare durations, belongs to the installed core.
+  warning.style.display = 'none';
   _syncCronSchedulePreview();
+  _queueCronSchedulePreview();
+}
+
+function _cronPreviewOwner() {
+  return JSON.stringify([S.activeProfile || 'default',
+    typeof _profileSwitchGeneration === 'number' ? _profileSwitchGeneration : 0]);
+}
+
+function _cronPreviewText(key, fallback) {
+  const value = t(key);
+  return value && value !== key ? value : fallback;
+}
+
+function _renderCronSchedulerZone() {
+  const el = $('cronFormSchedulerZone');
+  if (!el) return;
+  const metadata = _cronSchedulerMetadata?.owner === _cronPreviewOwner() ? _cronSchedulerMetadata : null;
+  el.textContent = `${t('cron_effective_timezone')}: ${metadata?.scheduler_timezone || t('cron_timezone_unknown')}`;
+}
+
+function _queueCronSchedulePreview() {
+  const input = $('cronFormSchedule');
+  const output = $('cronFormNextRun');
+  if (!input || !output) return;
+  clearTimeout(_cronPreviewTimer);
+  const sequence = ++_cronPreviewSequence;
+  const owner = _cronPreviewOwner();
+  const schedule = input.value.trim();
+  const owns = () => sequence === _cronPreviewSequence && owner === _cronPreviewOwner() &&
+    input.isConnected && $('cronFormSchedule') === input && $('cronFormNextRun') === output &&
+    input.value.trim() === schedule && (_cronMode === 'create' || _cronMode === 'edit');
+  _renderCronSchedulerZone();
+  // Clear immediately, before debounce/network: an old date must never label new input.
+  output.textContent = schedule
+    ? _cronPreviewText('cron_preview_loading', 'Checking next execution…')
+    : _cronPreviewText('cron_preview_empty', 'Enter a schedule to preview its next execution.');
+  if (!schedule) return;
+  _cronPreviewTimer = setTimeout(async () => {
+    if (!owns()) return;
+    try {
+      const data = await api('/api/crons/preview?schedule=' + encodeURIComponent(schedule), {timeoutToast:false});
+      if (!owns() || (data.active_profile && data.active_profile !== (S.activeProfile || 'default'))) return;
+      _cronSchedulerMetadata = {...data, owner};
+      _renderCronSchedulerZone();
+      if (data.status === 'ready' && data.next_run_at) {
+        output.textContent = _cronPreviewText('cron_preview_next', 'Next execution (schedule preview)') + ': ' +
+          _cronTimeLabel(data.next_run_at, data.scheduler_timezone);
+      } else if (data.status === 'invalid') {
+        output.textContent = _cronPreviewText('cron_preview_invalid', 'Invalid schedule') +
+          (data.error ? ': ' + data.error : '');
+      } else if (data.status === 'no_next_run') {
+        output.textContent = _cronPreviewText('cron_preview_none', 'The scheduler returned no next execution for this schedule.');
+      } else {
+        output.textContent = _cronPreviewText('cron_preview_unavailable', 'Schedule preview is unavailable in this scheduler.');
+      }
+      const warning = $('cronFormScheduleOnceWarning');
+      if (warning) warning.style.display = data.schedule?.kind === 'once' ? '' : 'none';
+    } catch (_) {
+      if (owns()) output.textContent = _cronPreviewText('cron_preview_failed', 'Could not load the preview. Edit the schedule to retry.');
+    }
+  }, 250);
 }
 
 // Live preview of the generated cron expression in the preset hint line (the
@@ -1125,6 +1191,9 @@ async function loadCronGatewayNotice() {
 }
 
 async function loadCrons(animate) {
+  const owner = _cronPreviewOwner();
+  const sequence = ++_cronListSequence;
+  const owns = () => owner === _cronPreviewOwner() && sequence === _cronListSequence;
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
   loadCronGatewayNotice();
@@ -1134,8 +1203,12 @@ async function loadCrons(animate) {
   }
   try {
     await loadCronProfiles();
+    if (!owns()) return;
     const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
     const data = await api('/api/crons' + allProfilesQS);
+    if (!owns() || (data.active_profile && data.active_profile !== (S.activeProfile || 'default'))) return;
+    _cronSchedulerMetadata = {...data, owner};
+    _renderCronSchedulerZone();
     _cronList = data.jobs || [];
     _cronOtherProfileCount = Number(data.other_profile_count || 0);
     if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
@@ -1218,9 +1291,9 @@ async function loadCrons(animate) {
       if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+  } catch(e) { if (owns()) box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
   finally {
-    if (animate && refreshBtn) {
+    if (owns() && animate && refreshBtn) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
@@ -1796,7 +1869,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
                 <span class="cron-schedule-preset-conj" aria-hidden="true">${esc(t('cron_schedule_conj_at_minute') || 'at minute')}</span>
                 <input type="number" id="cronFormScheduleMinute" min="0" max="59" step="1" value="0" autocomplete="off" aria-label="${esc(t('cron_schedule_minute_label') || 'Minute')}">
               </div>
-              <div class="detail-form-hint cron-schedule-preset-time-hint"><span id="cronFormSchedulePreview" class="cron-schedule-preview"></span>${esc(t('cron_effective_timezone'))}: ${esc(_cronPreFormDetail?.scheduler_timezone || t('cron_timezone_unknown'))}. ${esc(t('cron_preview_after_save'))}</div>
+              <div class="detail-form-hint cron-schedule-preset-time-hint"><span id="cronFormSchedulePreview" class="cron-schedule-preview"></span></div>
             </div>
           </div>
         </div>
@@ -1804,7 +1877,12 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           <label for="cronFormSchedule">${esc(t('cron_schedule_label') || 'Cron expression')}</label>
           <input type="text" id="cronFormSchedule" value="${esc(schedule || '')}" placeholder="0 9 * * *  —  every 1h  —  @daily" autocomplete="off" required>
           <div class="detail-form-hint">${esc(t('cron_schedule_hint') || "Cron expression or shorthand like 'every 1h'.")}</div>
-          <div id="cronFormScheduleOnceWarning" class="detail-form-warning cron-once-warning" style="display:none">${esc(t('cron_schedule_once_warning') || "Duration forms like '30m' run once and are removed after running. Use 'every 30m' to keep a recurring job.")}</div>
+          <div id="cronFormScheduleOnceWarning" class="detail-form-warning cron-once-warning" style="display:none">${esc(_cronPreviewText('cron_preview_once', 'The scheduler interprets this schedule as a one-time execution.'))}</div>
+        </div>
+        <div class="detail-form-row">
+          <div id="cronFormSchedulerZone" class="detail-form-hint"></div>
+          <div id="cronFormNextRun" class="detail-form-hint" role="status" aria-live="polite" aria-atomic="true"></div>
+          <div class="detail-form-hint">${esc(_cronPreviewText('cron_preview_hint', 'Evaluated now; saving may change relative times. This preview does not activate paused jobs.'))}</div>
         </div>
         ${scriptBlock}
         ${promptBlock}

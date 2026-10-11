@@ -14538,9 +14538,16 @@ def handle_get(handler, parsed) -> bool:
         active_profile = _get_active_profile_name() or "default"
         try:
             active_jobs, other_jobs = _cron_jobs_cross_profile(active_profile)
+            from api.cron import scheduler_metadata
+            from api.profiles import cron_profile_context
+            with cron_profile_context():
+                metadata = scheduler_metadata()
         except ModuleNotFoundError as exc:
             if exc.name in ("cron", "cron.jobs"):
-                return j(handler, {"jobs": [], "cron_unavailable": True})
+                return j(handler, {"jobs": [], "cron_unavailable": True,
+                                   "active_profile": active_profile,
+                                   "scheduler_timezone": None,
+                                   "schedule_preview_supported": False})
             raise
         all_profiles = _all_profiles_enabled(parsed)
         jobs = active_jobs + other_jobs if all_profiles else active_jobs
@@ -14550,7 +14557,21 @@ def handle_get(handler, parsed) -> bool:
             "all_profiles": all_profiles,
             "active_profile": active_profile,
             "other_profile_count": hidden_other_count,
+            **metadata,
         })
+
+    if parsed.path == "/api/crons/preview":
+        # Read-only: no job IDs, persistence, execution or browser timezone.
+        schedules = parse_qs(parsed.query, keep_blank_values=True).get("schedule", [])
+        if len(schedules) != 1 or not schedules[0].strip() or len(schedules[0]) > 1024:
+            return bad(handler, "Provide one non-empty schedule (maximum 1024 characters)")
+        from api.cron import preview_schedule
+        from api.profiles import cron_profile_context
+        with cron_profile_context():
+            _ensure_agent_cron_import_path()
+            result = preview_schedule(schedules[0])
+            result["active_profile"] = _get_active_profile_name() or "default"
+            return j(handler, result)
 
     if parsed.path == "/api/crons/output":
         from api.profiles import cron_profile_context
