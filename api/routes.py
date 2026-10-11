@@ -18087,6 +18087,23 @@ def _handle_sessions_search(handler, parsed):
         _search_redact_enabled = bool(load_settings().get("api_redact_enabled", True))
     except Exception:
         _search_redact_enabled = True  # fail safe: redact when settings unreadable
+    if qs.get("scope", [""])[0] == "full" and q:
+        from api.config import SESSION_DIR
+        from api.session_search import search_saved_history
+        try:
+            payload = search_saved_history(
+                sessions, q, qs.get("cursor", [""])[0], SESSION_DIR,
+                _session_search_message_text, _session_search_preview,
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        for item in payload["sessions"]:
+            item["match_preview"] = _redact_text(item["match_preview"], _enabled=_search_redact_enabled)
+            if isinstance(item.get("title"), str):
+                item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
+            _redact_sidebar_title_fields(item, _search_redact_enabled)
+        payload.update(query=q, active_profile=active_profile, all_profiles=all_profiles)
+        return j(handler, payload)
     if not q:
         safe_sessions = []
         for s in sessions:

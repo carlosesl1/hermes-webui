@@ -6493,6 +6493,9 @@ function stopGatewaySSE(){
 
 let _searchDebounceTimer = null;
 let _contentSearchResults = [];  // results from /api/sessions/search content scan
+let _sessionSearchGeneration = 0;
+let _sessionSearchController = null;
+let _sessionSearchState = {mode:'fast', status:'idle', cursor:null, skipped:0};
 let _lastSessionSearchQuery = '';
 let _hideSearchPreviewsAfterSelect = false;
 let _archivedSearchPagingQueryActive = false;
@@ -6636,7 +6639,7 @@ function _sessionSearchMergeMatches(sessions, query, contentResults){
   const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(sessions,source);
   const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));
   return [
-    ...directAndTitleMatches,
+    ...directAndTitleMatches.map(s=>Object.assign({},s,(contentResults||[]).find(hit=>hit.session_id===s.session_id)||{})),
     ...(contentResults||[]).filter(s=>s&&s.match_type==='content'&&!directOrTitleIds.has(s.session_id))
   ];
 }
@@ -6671,12 +6674,112 @@ function _syncArchivedSearchPagingRefresh(query){
   if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false});
 }
 
+function _sessionSearchScope(){
+  return S.activeProfile || 'default';
+}
+
+function _renderSessionSearchStatus(){
+  const input=$('sessionSearch');
+  if(!input || !input.closest) return;
+  let box=$('sessionSearchStatus');
+  if(!box){
+    box=document.createElement('div');box.id='sessionSearchStatus';
+    box.style.cssText='font-size:12px;color:var(--muted);padding-top:6px;';
+    input.closest('.session-search').appendChild(box);
+  }
+  box.replaceChildren();
+  if(!input.value.trim()) return;
+  const state=_sessionSearchState;
+  const note=document.createElement('div');note.setAttribute('role','status');
+  const key=state.status==='error'?'search_failed':state.status==='loading'?'search_loading':
+    state.status==='cancelled'?'search_cancelled':state.skipped?'search_incomplete':
+    state.mode==='full'?(state.cursor?'search_partial':'search_saved_scope'):'search_fast_scope';
+  note.textContent=t(key);box.appendChild(note);
+  if(state.status==='ready' && !_contentSearchResults.length && !_sessionSearchDirectAndTitleMatches(_allSessions,input.value.trim()).length){
+    const empty=document.createElement('div');empty.textContent=t('search_empty_scope');box.appendChild(empty);
+  }
+  const button=document.createElement('button');button.type='button';button.className='btn btn-sm';
+  button.style.cssText='max-width:100%;white-space:normal;margin-top:4px;';
+  button.textContent=t(state.status==='loading'?'search_cancel':state.cursor?'search_continue':'search_full');
+  button.onclick=()=>state.status==='loading'?cancelSessionHistorySearch():searchSessionHistory();
+  box.appendChild(button);
+}
+
+function cancelSessionHistorySearch(){
+  ++_sessionSearchGeneration;
+  clearTimeout(_searchDebounceTimer);
+  if(_sessionSearchController) _sessionSearchController.abort();
+  _sessionSearchController=null;
+  _sessionSearchState.status='cancelled';
+  _renderSessionSearchStatus();
+}
+
+async function searchSessionHistory(){
+  const q=($('sessionSearch').value||'').trim();
+  if(!q) return;
+  clearTimeout(_searchDebounceTimer);
+  if(_sessionSearchController) _sessionSearchController.abort();
+  const generation=++_sessionSearchGeneration, profile=_sessionSearchScope();
+  const cursor=_sessionSearchState.mode==='full'?_sessionSearchState.cursor:null;
+  if(!cursor) _contentSearchResults=[];
+  _hideSearchPreviewsAfterSelect=false;
+  _sessionSearchState={mode:'full',status:'loading',cursor,skipped:cursor?_sessionSearchState.skipped:0};
+  const controller=new AbortController();_sessionSearchController=controller;
+  const owns=()=>generation===_sessionSearchGeneration && profile===_sessionSearchScope() && q===($('sessionSearch').value||'').trim();
+  _renderSessionSearchStatus();
+  try{
+    const data=await api(`/api/sessions/search?q=${encodeURIComponent(q)}&scope=full&cursor=${encodeURIComponent(cursor||'')}`,{signal:controller.signal,timeoutMs:10000});
+    if(!owns()) return;
+    if(!data || !Array.isArray(data.sessions) || data.active_profile!==profile) throw new Error('Search unavailable');
+    const existing=new Set(_contentSearchResults.map(s=>s.session_id));
+    _contentSearchResults.push(...data.sessions.filter(s=>!existing.has(s.session_id)));
+    // Bound retained results too: continuing is always an explicit action.
+    if(_contentSearchResults.length>240) _contentSearchResults=_contentSearchResults.slice(-240);
+    _sessionSearchState.cursor=data.next_cursor;
+    _sessionSearchState.skipped+=Number(data.skipped)||0;
+    _sessionSearchState.status='ready';
+    renderSessionListFromCache();
+  }catch(error){if(owns()) _sessionSearchState.status='error';}
+  finally{if(owns()){_sessionSearchController=null;_renderSessionSearchStatus();}}
+}
+
+async function _openSessionSearchResult(session){
+  const profile=_sessionSearchScope();
+  if(session.profile && session.profile!==profile) return;
+  await _openSidebarSession(session,{skipLineageResolve:true});
+  if(S.session?.session_id!==session.session_id || profile!==_sessionSearchScope()) return;
+  const generation=_loadSessionGeneration, location=session.match_location;
+  if(!location) return;
+  try{
+    // Explicit result-open only; reuse the authoritative hydration/ownership guards.
+    await expandFullTranscript();
+    if(generation!==_loadSessionGeneration || S.session?.session_id!==session.session_id) return;
+    const messages=S.messages||[];
+    let index=location.message_uid?messages.findIndex(m=>m.message_uid===location.message_uid):-1;
+    if(index<0 && !location.message_uid && location.unique_text && messages.length===location.message_count) index=location.index;
+    const message=messages[index];
+    if(!message || message.role!==location.role) throw new Error('Location changed');
+    const body=Array.isArray(message.content)?message.content.filter(p=>p?.type==='text').map(p=>String(p.text||'')).join(' '):String(message.content||'');
+    const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(body));
+    const hash=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
+    if(generation!==_loadSessionGeneration || S.session?.session_id!==session.session_id) return;
+    if(hash!==location.text_sha256) throw new Error('Location changed');
+    await jumpToTurnQuestion(index,index);
+  }catch(error){if(generation===_loadSessionGeneration) showToast(t('search_location_changed'));}
+}
+
 function filterSessions(){
   // Immediate client-side title filter (no flicker)
   // Debounced content search via API for message text
   syncSessionSearchClear();
   const q = ($('sessionSearch').value || '').trim();
   _syncArchivedSearchPagingRefresh(q);
+  const generation=++_sessionSearchGeneration, profile=_sessionSearchScope();
+  if(_sessionSearchController) _sessionSearchController.abort();
+  _sessionSearchController=null;
+  _sessionSearchState={mode:'fast',status:q?'loading':'idle',cursor:null,skipped:0};
+  _contentSearchResults=[];
+  _renderSessionSearchStatus();
   if(q!==_lastSessionSearchQuery){
     _lastSessionSearchQuery=q;
     _hideSearchPreviewsAfterSelect=false;
@@ -6689,12 +6792,19 @@ function filterSessions(){
     try {
       const data = await api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=5`);
       const currentQ = ($('sessionSearch').value || '').trim();
-      if(currentQ!==requestedQ) return;
+      if(currentQ!==requestedQ || generation!==_sessionSearchGeneration || profile!==_sessionSearchScope()) return;
+      if(!data || !Array.isArray(data.sessions)) throw new Error('Search unavailable');
       const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);
       const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));
       _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !directOrTitleIds.has(s.session_id));
       renderSessionListFromCache();
-    } catch(e) { /* ignore */ }
+      _sessionSearchState.status='ready';
+      _renderSessionSearchStatus();
+    } catch(e) {
+      if(generation===_sessionSearchGeneration && profile===_sessionSearchScope()){
+        _sessionSearchState.status='error';_renderSessionSearchStatus();
+      }
+    }
   }, 350);
 }
 
@@ -9043,7 +9153,8 @@ function renderSessionListFromCache(){
         if(_renamingSid) return;
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-          await _openSidebarSession(s);
+          if(s.match_location) await _openSessionSearchResult(s);
+          else await _openSidebarSession(s);
         }finally{
           el.classList.remove('loading');
         }
