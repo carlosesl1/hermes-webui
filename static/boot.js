@@ -808,9 +808,10 @@ function _micToastKeyForRecognitionError(error){
   ta.addEventListener('input',()=>{ _draftRevision++; });
 
   function _voiceOwner(){
+    const sid=S.session?.session_id||null;
     return {
-      sid:S.session?.session_id||null,
-      profile:S.activeProfile||'default',
+      sid,
+      profile:S.activeProfile||S.session?.profile||'default',
       generation:typeof _loadSessionGeneration==='undefined'?null:_loadSessionGeneration,
       profileGeneration:typeof _profileSwitchGeneration==='undefined'?null:_profileSwitchGeneration,
     };

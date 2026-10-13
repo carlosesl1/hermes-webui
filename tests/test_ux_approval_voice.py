@@ -412,6 +412,22 @@ def test_same_session_id_different_profile_is_not_owner(page):
     assert page.evaluate('S.pendingFiles[0].text()') == 'same recording'
 
 
+def test_session_profile_owns_deferred_voice_when_active_profile_is_unset(page):
+    page.evaluate("""() => {
+      delete S.activeProfile;
+      S.session={session_id:'a',profile:'work'};
+    }""")
+    voice(page, text='draft')
+    defer_stt(page)
+    page.evaluate('window._micPendingSend=true;window._stopMic()')
+    page.wait_for_function('sttResolvers.length===1')
+    page.evaluate("S.activeProfile='work'")
+    settle_stt(page)
+    page.wait_for_function("$('msg').value==='draft spoken words'")
+    assert page.evaluate('sendCount') == 1
+    assert page.locator('#micRecordingRecovery').count() == 0
+
+
 @pytest.mark.parametrize('change', ['none', 'navigate', 'edit'])
 def test_browser_speech_stop_retains_owner_and_send_snapshot(page, change):
     page.evaluate("""() => {
