@@ -1,10 +1,12 @@
 """Offline regressions for fork/source-image distribution identity."""
+import io
 import json
 import os
 from pathlib import Path
 import runpy
 import subprocess
 import sys
+import tarfile
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +15,11 @@ from api import updates
 
 ROOT = Path(__file__).resolve().parents[1]
 FORK = 'https://github.com/carlosesl1/hermes-webui'
+
+
+def _workflow_trigger(workflow):
+    # PyYAML follows YAML 1.1 and parses the GitHub Actions "on" key as True.
+    return workflow.get('on', workflow.get(True))
 
 
 @pytest.mark.parametrize('declaration', ['__source__', '__source__: str'])
@@ -94,10 +101,102 @@ def test_invalid_revision_does_not_write_metadata(tmp_path):
     assert not target.exists()
 
 
+def test_exact_head_pull_request_workflows_cover_code_changes():
+    import yaml
+
+    workflows = {
+        'tests': yaml.safe_load((ROOT / '.github/workflows/tests.yml').read_text()),
+        'browser-smoke': yaml.safe_load((ROOT / '.github/workflows/browser-smoke.yml').read_text()),
+        'conversation-lifecycle': yaml.safe_load(
+            (ROOT / '.github/workflows/conversation-lifecycle.yml').read_text()
+        ),
+    }
+    for workflow in workflows.values():
+        pull_request = _workflow_trigger(workflow)['pull_request']
+        assert pull_request['branches'] == ['master']
+
+    for name in ('tests', 'browser-smoke'):
+        pull_request = _workflow_trigger(workflows[name])['pull_request']
+        assert 'paths' not in pull_request
+        assert 'paths-ignore' not in pull_request
+        detect = next(
+            step for step in workflows[name]['jobs']['changes']['steps']
+            if step.get('id') == 'detect'
+        )
+        assert detect['env']['HEAD_SHA'] == '${{ github.event.pull_request.head.sha }}'
+        assert 'RANGE="$BASE_SHA...$HEAD_SHA"' in detect['run']
+
+    assert workflows['tests']['jobs']['test']['if'] == '${{ always() }}'
+    assert workflows['browser-smoke']['jobs']['browser-smoke']['if'] == '${{ always() }}'
+
+    lifecycle_paths = set(_workflow_trigger(
+        workflows['conversation-lifecycle']
+    )['pull_request']['paths'])
+    assert {'api/**.py', 'static/**'} <= lifecycle_paths
+
+
+def test_source_archive_discovers_distribution_tests_without_git(tmp_path):
+    if not (ROOT / '.git').exists():
+        pytest.skip('source archive export requires a git checkout')
+
+    archive_paths = [
+        '.github/workflows',
+        'api',
+        'docker-compose.yml',
+        'docker-compose.two-container.yml',
+        'docker-compose.three-container.yml',
+        'pytest.ini',
+        'scripts',
+        'tests/test_distribution_identity.py',
+    ]
+    archive = subprocess.run(
+        ['git', 'archive', '--format=tar', 'HEAD', *archive_paths],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    extract_root = tmp_path / 'source'
+    extract_root.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+        target_root = extract_root.resolve()
+        for member in tar.getmembers():
+            target = (extract_root / member.name).resolve()
+            assert target == target_root or target_root in target.parents
+        tar.extractall(extract_root, filter='data')
+
+    assert not (extract_root / '.git').exists()
+    assert (extract_root / 'scripts/test.sh').exists()
+    assert (extract_root / 'tests/test_distribution_identity.py').exists()
+
+    env = os.environ.copy()
+    env.pop('PYTHONPATH', None)
+    env['HERMES_DISABLE_LAZY_INSTALLS'] = '1'
+    env['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] = '1'
+    collected = subprocess.run(
+        [
+            sys.executable,
+            '-m',
+            'pytest',
+            '-q',
+            '--collect-only',
+            'tests/test_distribution_identity.py',
+        ],
+        cwd=extract_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert collected.returncode == 0, collected.stdout + collected.stderr
+    assert 'test_baked_metadata_roundtrip_without_git' in collected.stdout
+
+
 def test_manual_image_workflow_has_no_release_or_floating_tag():
     import yaml
     workflow = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text())
-    trigger = workflow.get('on', workflow.get(True))  # PyYAML's YAML 1.1 "on"
+    trigger = _workflow_trigger(workflow)
     assert 'workflow_dispatch' in trigger
     steps = workflow['jobs']['release']['steps']
     release = next(s for s in steps if s.get('uses', '').startswith('softprops/'))
@@ -122,4 +221,3 @@ def test_every_compose_topology_builds_the_reviewed_checkout(filename):
     if filename != 'docker-compose.yml':
         assert service['image'] == 'hermes-webui:local'
         assert service['pull_policy'] == 'build'
-
