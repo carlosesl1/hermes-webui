@@ -459,6 +459,112 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
     assert exhausted_token not in output
 
 
+def test_codex_account_usage_labels_windows_by_duration(monkeypatch, capsys):
+    """Codex account windows must use provider duration semantics, not field position."""
+    import api.providers as providers
+
+    def b64url(payload: bytes) -> str:
+        return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+
+    def token_for(account_id: str) -> str:
+        return ".".join((
+            b64url(b'{"alg":"none","typ":"JWT"}'),
+            b64url(json.dumps({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": account_id,
+                },
+            }).encode("utf-8")),
+            b64url(b"signature"),
+        ))
+
+    weekly_token = token_for("acct-weekly-primary")
+    unknown_token = token_for("acct-unknown-duration")
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    account_usage_mod = types.ModuleType("agent.account_usage")
+    credential_pool_mod = types.ModuleType("agent.credential_pool")
+
+    def fake_fetch_account_usage(provider, *, base_url=None, api_key=None):
+        return None
+
+    class FakePool:
+        def entries(self):
+            return [
+                SimpleNamespace(
+                    label="Weekly primary",
+                    runtime_api_key=weekly_token,
+                    runtime_base_url="https://chatgpt.com/backend-api/codex",
+                    last_status=None,
+                ),
+                SimpleNamespace(
+                    label="Unknown duration",
+                    runtime_api_key=unknown_token,
+                    runtime_base_url="https://chatgpt.com/backend-api/codex",
+                    last_status=None,
+                ),
+            ]
+
+        def select(self):
+            raise AssertionError("quota display must not rotate credential_pool selection")
+
+    def fake_load_pool(provider):
+        return FakePool()
+
+    def fake_urlopen(req, timeout):
+        headers = {key.lower(): value for key, value in req.header_items()}
+        if headers.get("chatgpt-account-id") == "acct-unknown-duration":
+            payload = {
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": {
+                        "duration_seconds": 12345,
+                        "used_percent": 45,
+                        "reset_at": "2030-03-18T12:30:00Z",
+                    },
+                    "secondary_window": None,
+                    "additional_limits": None,
+                },
+            }
+        else:
+            payload = {
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": {
+                        "duration_seconds": 604800,
+                        "used_percent": 25,
+                        "reset_at": "2030-03-24T12:30:00Z",
+                    },
+                    "secondary_window": None,
+                    "additional_limits": None,
+                },
+                "credits": {"has_credits": True, "balance": 12.5},
+            }
+        return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    account_usage_mod.fetch_account_usage = fake_fetch_account_usage
+    credential_pool_mod.load_pool = fake_load_pool
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", credential_pool_mod)
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", "openai-codex", ""])
+
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, {"__name__": "__main__"})
+
+    output = capsys.readouterr().out.strip()
+    snapshot = json.loads(output)
+
+    assert [w["label"] for w in snapshot["windows"]] == ["Weekly", "Window"]
+    assert [w["label"] for w in snapshot["pool"]["best_remaining_by_window"]] == ["Weekly", "Window"]
+    assert snapshot["pool"]["credentials"][0]["windows"][0]["label"] == "Weekly"
+    unknown_window = snapshot["pool"]["credentials"][1]["windows"][0]
+    assert unknown_window["label"] == "Window"
+    assert unknown_window["detail"] == "Duration: 12345 seconds"
+    assert weekly_token not in output
+    assert unknown_token not in output
+
+
 def test_codex_account_usage_subprocess_retries_expired_pool_exhaustion(monkeypatch, capsys):
     """Expired pool cooldowns should be probed instead of shown as still exhausted."""
     import api.providers as providers

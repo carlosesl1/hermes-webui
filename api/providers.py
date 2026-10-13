@@ -329,6 +329,73 @@ def _entry_value(entry, *names):
     return None
 
 
+_CODEX_WINDOW_LABEL_BY_SECONDS = {
+    5 * 60 * 60: "Session",
+    7 * 24 * 60 * 60: "Weekly",
+}
+_CODEX_LEGACY_WINDOW_LABEL_BY_KEY = {
+    "primary_window": "Session",
+    "secondary_window": "Weekly",
+}
+_CODEX_WINDOW_DURATION_KEYS = (
+    "duration_seconds",
+    "window_seconds",
+    "period_seconds",
+    "seconds",
+    "duration",
+)
+
+
+def _codex_window_duration_seconds(window):
+    if not isinstance(window, dict):
+        return None
+    for key in _CODEX_WINDOW_DURATION_KEYS:
+        value = _number(window.get(key))
+        if value is None:
+            continue
+        try:
+            duration = float(value)
+        except Exception:
+            continue
+        if duration <= 0:
+            continue
+        seconds = int(duration)
+        if abs(duration - seconds) <= 0.001:
+            return seconds
+    return None
+
+
+def _codex_window_label(window, fallback_label):
+    duration = _codex_window_duration_seconds(window)
+    if duration is None:
+        return fallback_label
+    return _CODEX_WINDOW_LABEL_BY_SECONDS.get(duration, "Window")
+
+
+def _codex_window_detail(window):
+    duration = _codex_window_duration_seconds(window)
+    if duration is None or duration in _CODEX_WINDOW_LABEL_BY_SECONDS:
+        return None
+    return "Duration: " + str(duration) + " seconds"
+
+
+def _codex_rate_limit_windows(rate_limit):
+    for key in ("primary_window", "secondary_window"):
+        window = rate_limit.get(key)
+        if isinstance(window, dict):
+            yield window, _CODEX_LEGACY_WINDOW_LABEL_BY_KEY[key]
+    additional = rate_limit.get("additional_limits")
+    if isinstance(additional, list):
+        iterable = additional
+    elif isinstance(additional, dict):
+        iterable = additional.values()
+    else:
+        iterable = ()
+    for window in iterable:
+        if isinstance(window, dict):
+            yield window, "Window"
+
+
 def _codex_snapshot_from_usage_payload(payload):
     if not isinstance(payload, dict):
         payload = {}
@@ -336,18 +403,16 @@ def _codex_snapshot_from_usage_payload(payload):
     if not isinstance(rate_limit, dict):
         rate_limit = {}
     windows = []
-    for key, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):
-        window = rate_limit.get(key)
-        if not isinstance(window, dict):
-            continue
+    for window, fallback_label in _codex_rate_limit_windows(rate_limit):
         used = _number(window.get("used_percent"))
         if used is None:
             continue
+        label = _codex_window_label(window, fallback_label)
         windows.append(SimpleNamespace(
             label=label,
             used_percent=float(used),
             reset_at=_parse_dt(window.get("reset_at")),
-            detail=None,
+            detail=_codex_window_detail(window),
         ))
 
     details = []
