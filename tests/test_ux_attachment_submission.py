@@ -129,6 +129,19 @@ assert.equal($('msg').value,'fresh');
 """)
 
 
+def test_session_profile_owns_attachment_when_active_profile_is_unset():
+    run_js(r"""
+delete S.activeProfile;S.session={session_id:'A',profile:'p',model:'fixture',title:'Fixture',workspace:'.'};
+$('msg').value='profile fallback';S.pendingFiles=[new File(['a'],'a.txt')];
+await send();
+assert.equal(starts.length,1);
+assert.equal(starts[0].session_id,'A');
+assert.equal(starts[0].profile,'p');
+assert.equal(starts[0].attachments.length,1);
+assert.equal(_attachmentSubmissionCurrent(),null);
+""")
+
+
 def test_draft_writes_order_and_quiet_failure_recovery():
     run_js(r"""
 const writes=[];let finish;api=(url,opts)=>{writes.push(JSON.parse(opts.body));return writes.length===1?new Promise(r=>finish=r):Promise.resolve({ok:true});};

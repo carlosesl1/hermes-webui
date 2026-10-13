@@ -22012,7 +22012,11 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
 // Attachment submission recovery is separate from the next editable draft.
 const _attachmentSubmissions=new Map();
 let _attachmentSendInProgress=false;
-function _attachmentOwner(sid,profile){return JSON.stringify([profile||S.activeProfile||'default',sid||(S.session&&S.session.session_id)||'']);}
+function _attachmentOwner(sid,profile){
+  const resolvedSid=sid||(S.session&&S.session.session_id)||'';
+  const sessionProfile=(S.session&&S.session.session_id===resolvedSid)?S.session.profile:null;
+  return JSON.stringify([profile||S.activeProfile||sessionProfile||'default',resolvedSid]);
+}
 function _attachmentText(key,fallback){return typeof _t==='function'?_t(key,fallback):(t(key)===key?fallback:t(key));}
 function _attachmentResult(file,owner){
   if(file._uploadOwner===owner&&file._uploadedAttachment)return file._uploadedAttachment;
