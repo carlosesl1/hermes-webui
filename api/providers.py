@@ -174,6 +174,7 @@ def _account_usage_preexec_fn() -> None:
 _ACCOUNT_USAGE_SUBPROCESS_CODE = r"""
 import base64
 import json
+import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -239,6 +240,8 @@ def _snapshot_available(snapshot):
 def _number(value):
     if isinstance(value, bool) or value is None:
         return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if isinstance(value, (int, float)):
         return value
     try:
@@ -246,6 +249,8 @@ def _number(value):
         if not text:
             return None
         number = float(text)
+        if not math.isfinite(number):
+            return None
         return int(number) if number.is_integer() else number
     except Exception:
         return None
@@ -338,6 +343,7 @@ _CODEX_LEGACY_WINDOW_LABEL_BY_KEY = {
     "secondary_window": "Weekly",
 }
 _CODEX_WINDOW_DURATION_KEYS = (
+    "limit_window_seconds",
     "duration_seconds",
     "window_seconds",
     "period_seconds",

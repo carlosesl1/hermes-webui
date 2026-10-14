@@ -12,9 +12,11 @@ import threading
 import types
 import urllib.error
 from datetime import datetime, timezone
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import api.config as config
 import api.profiles as profiles
@@ -459,7 +461,8 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
     assert exhausted_token not in output
 
 
-def test_codex_account_usage_labels_windows_by_duration(monkeypatch, capsys):
+@pytest.mark.parametrize("duration_key", ["limit_window_seconds", "duration_seconds"])
+def test_codex_account_usage_labels_windows_by_duration(monkeypatch, capsys, duration_key):
     """Codex account windows must use provider duration semantics, not field position."""
     import api.providers as providers
 
@@ -518,7 +521,7 @@ def test_codex_account_usage_labels_windows_by_duration(monkeypatch, capsys):
                 "plan_type": "pro",
                 "rate_limit": {
                     "primary_window": {
-                        "duration_seconds": 12345,
+                        duration_key: 12345,
                         "used_percent": 45,
                         "reset_at": "2030-03-18T12:30:00Z",
                     },
@@ -531,7 +534,7 @@ def test_codex_account_usage_labels_windows_by_duration(monkeypatch, capsys):
                 "plan_type": "pro",
                 "rate_limit": {
                     "primary_window": {
-                        "duration_seconds": 604800,
+                        duration_key: 604800,
                         "used_percent": 25,
                         "reset_at": "2030-03-24T12:30:00Z",
                     },
@@ -563,6 +566,84 @@ def test_codex_account_usage_labels_windows_by_duration(monkeypatch, capsys):
     assert unknown_window["detail"] == "Duration: 12345 seconds"
     assert weekly_token not in output
     assert unknown_token not in output
+
+
+@pytest.fixture
+def codex_usage_helpers(monkeypatch):
+    """Load the actual child code without importing core or probing credentials."""
+    import api.providers as providers
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    usage_mod = types.ModuleType("agent.account_usage")
+    usage_mod.fetch_account_usage = lambda *_args, **_kwargs: None
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", usage_mod)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", "--worker"])
+    monkeypatch.setattr(sys, "stdin", StringIO(""))
+    namespace = {"__name__": "__main__"}
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, namespace)
+    return namespace
+
+
+@pytest.mark.parametrize("window_key", ["primary_window", "secondary_window"])
+@pytest.mark.parametrize("seconds,label,detail", [
+    (604800, "Weekly", None),
+    ("604800", "Weekly", None),
+    (18000, "Session", None),
+    (12345, "Window", "Duration: 12345 seconds"),
+])
+def test_codex_raw_window_duration(codex_usage_helpers, window_key, seconds, label, detail):
+    rate_limit = {"primary_window": None, "secondary_window": None}
+    rate_limit[window_key] = {
+        "limit_window_seconds": seconds,
+        "used_percent": 25,
+        "reset_at": 1_900_000_000,
+    }
+    snapshot = codex_usage_helpers["_codex_snapshot_from_usage_payload"]({"rate_limit": rate_limit})
+    windows = codex_usage_helpers["_snapshot_windows_payload"](snapshot)
+    assert windows == [{
+        "label": label,
+        "used_percent": 25.0,
+        "remaining_percent": 75.0,
+        "reset_at": "2030-03-17T17:46:40Z",
+        "detail": detail,
+    }]
+
+
+def test_codex_raw_duration_precedes_alias(codex_usage_helpers):
+    snapshot = codex_usage_helpers["_codex_snapshot_from_usage_payload"]({
+        "rate_limit": {"primary_window": {
+            "limit_window_seconds": 604800, "duration_seconds": 18000, "used_percent": 25,
+        }},
+    })
+    assert snapshot.windows[0].label == "Weekly"
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("duration_key", ["limit_window_seconds", "duration_seconds"])
+def test_codex_nonfinite_duration_keeps_usable_window(codex_usage_helpers, value, duration_key):
+    snapshot = codex_usage_helpers["_codex_snapshot_from_usage_payload"]({
+        "rate_limit": {"primary_window": {duration_key: value, "used_percent": 25}},
+    })
+    assert snapshot.available is True
+    assert snapshot.windows[0].label == "Session"  # Existing no-valid-duration fallback.
+    assert snapshot.windows[0].detail is None
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "NaN", "Infinity", "-Infinity"])
+def test_codex_nonfinite_usage_is_not_available_quota(codex_usage_helpers, value):
+    snapshot = codex_usage_helpers["_codex_snapshot_from_usage_payload"]({
+        "rate_limit": {
+            "primary_window": {"limit_window_seconds": 604800, "used_percent": value},
+            "secondary_window": None,
+        },
+        "credits": {"has_credits": True, "balance": value},
+    })
+    assert snapshot.available is False
+    assert snapshot.windows == ()
+    assert snapshot.details == ()
+    json.dumps(codex_usage_helpers["_snapshot_payload"](snapshot), allow_nan=False)
 
 
 def test_codex_account_usage_subprocess_retries_expired_pool_exhaustion(monkeypatch, capsys):
