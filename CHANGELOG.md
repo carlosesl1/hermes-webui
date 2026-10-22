@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+### Interaction safety and recoverable UX
+
+- Approval keyboard actions respect focus; partial attachment uploads, drafts, voice recovery and unsaved editors preserve user intent and session ownership.
+- Busy composer actions and critical recovery states are explicit. Mobile controls and navigation labels stay reachable without replacing the existing layout.
+- Explicit saved-history search adds bounded continuation, snippets and reliable jumps. URL/reload/Back/Forward restore panels and items without silently changing profiles or losing unsaved settings.
+- Preferences expose frequent settings before searchable advanced groups; scheduling shows authoritative timezone/next-run previews; metric errors are not zeroes; export, sharing and clearing are separated.
+- See [interaction safety](docs/interaction-safety.md) for scope, compatibility behavior and reproducible offline checks.
+
 ### Compaction replay visibility
 
 - Compaction replay no longer appears as a new human message after the final answer. WebUI marks newly created replay rows with durable, model-actionable display provenance, preserves it through SQLite/reload, and keeps raw paging coordinates intact. Conservative same-UID legacy projection preserves genuine quotations and repeated turns. Desktop/mobile browser and isolated-core regressions cover final visibility and successive compactions.

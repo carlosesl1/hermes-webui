@@ -41,6 +41,30 @@ const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
+const _composerDraftLocal = new Map();
+const _composerDraftWrites = new Map();
+const _composerDraftSaveErrors = new Set();
+function _composerDraftOwner(sid, profile=S.activeProfile||'default') { return JSON.stringify([profile,sid]); }
+function _persistComposerDraft(sid, text, files, profile=S.activeProfile||'default') {
+  const key=_composerDraftOwner(sid,profile);
+  const draft={text,files:Array.isArray(files)?[...files]:[]};
+  _composerDraftLocal.set(key,draft);
+  const previous=_composerDraftWrites.get(key)||Promise.resolve();
+  const write=previous.catch(()=>{}).then(()=>api('/api/session/draft',{
+    method:'POST',timeoutToast:false,retries:0,
+    body:JSON.stringify({session_id:sid,text,files:_composerDraftFilesForPersist(draft.files)}),
+  })).then(result=>{
+    if(!result)throw new Error('Draft not saved');
+    if(_composerDraftLocal.get(key)!==draft)return;
+    _composerDraftSaveErrors.delete(key);
+    if((S.activeProfile||'default')===profile)_rememberComposerDraftPayloadState(sid,text,_composerDraftFilesForPersist(files));
+  }).catch(()=>{if(_composerDraftLocal.get(key)===draft)_composerDraftSaveErrors.add(key);}).finally(()=>{
+    if(_composerDraftWrites.get(key)===write)_composerDraftWrites.delete(key);
+    if(typeof renderTray==='function'&&_composerDraftOwner(S.session&&S.session.session_id)===key)renderTray();
+  });
+  _composerDraftWrites.set(key,write);
+  return write;
+}
 
 function _composerDraftFileSignature(file) {
   if (typeof file === 'string') return { value: file };
@@ -66,7 +90,7 @@ function _composerDraftFilesForPersist(files) {
     if (!file || typeof file !== 'object') return String(file || '');
     const canon = {
       name: String(file.name || file.filename || ''),
-      path: String(file.path || ''),
+      path: String(file.path || (file._uploadedAttachment&&file._uploadedAttachment.path) || ''),
       size: Number.isFinite(Number(file.size)) ? Number(file.size) : null,
       type: String(file.type || file.mime || ''),
     };
@@ -222,17 +246,14 @@ function _saveComposerDraft(sid, text, files) {
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  const profile=S.activeProfile||'default';
+  _composerDraftLocal.set(_composerDraftOwner(sid,profile),{text:normalizedText,files:[...(files||[])]});
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
   }
   _draftSaveTimer = setTimeout(() => {
-    api('/api/session/draft', {
-      method: 'POST',
-      body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-    }).then(() => {
-      _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-    }).catch(() => {});
+    _persistComposerDraft(sid,normalizedText,files,profile);
   }, _DRAFT_SAVE_DELAY_MS);
 }
 
@@ -265,6 +286,7 @@ function _saveComposerDraftNow(sid, text, files) {
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  _composerDraftLocal.set(_composerDraftOwner(sid),{text:normalizedText,files:[...(files||[])]});
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
   }
@@ -274,15 +296,12 @@ function _saveComposerDraftNow(sid, text, files) {
   if (!_composerDraftHasPayload(normalizedText, normalizedFiles)
       && S.session && S.session.session_id === sid
       && !_sessionComposerDraftHasPayload(S.session)
-      && !_composerDraftKnownPayloadSessions.has(sid)) {
+      && !_composerDraftKnownPayloadSessions.has(sid)
+      && !_composerDraftWrites.has(_composerDraftOwner(sid))
+      && !_composerDraftSaveErrors.has(_composerDraftOwner(sid))) {
     return Promise.resolve();
   }
-  return api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-  }).then(() => {
-    _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-  }).catch(() => {});
+  return _persistComposerDraft(sid,normalizedText,files);
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -294,6 +313,8 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // targetSid is the session that was requested — if it no longer matches
   // _loadingSessionId, a newer session switch has already begun, so skip.
   if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return;
+  if(targetSid&&S.session&&S.session.session_id!==targetSid)return;
+  draft=_composerDraftLocal.get(_composerDraftOwner(targetSid||(S.session&&S.session.session_id)))||draft;
   const text = (draft && typeof draft.text === 'string') ? draft.text : '';
   const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
   const current = ta.value || '';
@@ -309,7 +330,9 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // composer is the authoritative in-progress draft; never replace non-empty
   // local input with an older server draft. Cross-session switches still restore
   // normally so the previous session's composer contents do not leak forward.
-  if (preserveActiveInput && current && current !== text) return;
+  if (preserveActiveInput && (current || S.pendingFiles.length)) return;
+  S.pendingFiles=typeof _attachmentRecover==='function'?_attachmentRecover(files):files.map(f=>({...f,needsReselect:!f.path}));
+  if(typeof renderTray==='function')renderTray();
 
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
@@ -327,7 +350,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
     if (typeof autoResize === 'function') autoResize();
     if (typeof updateSendBtn === 'function') updateSendBtn();
   }
-  // Files restoration is skipped for now (requires S.pendingFiles plumbing).
+  // File bytes only survive within this tab. Metadata-only files need reselection.
 }
 
 // Clear the saved draft for a session (called when message is sent).
@@ -337,12 +360,7 @@ function _clearComposerDraft(sid, text, files) {
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
-  return api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
-  }).then(() => {
-    _rememberComposerDraftPayloadState(sid, '', []);
-  }).catch(() => {});
+  return _persistComposerDraft(sid,'',[]);
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
@@ -1399,6 +1417,9 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    if(typeof _editorNeedsGuard==='function' && _editorNeedsGuard()
+        && !await guardUnsavedEditors()) return false;
+    if(typeof clearPreview==='function') clearPreview({bypassGuard:true, keepPanelOpen:true});
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1738,6 +1759,11 @@ async function loadSession(sid){
     }
     return;
   }
+  // Keep the no-op above synchronous; all destructive navigation starts only
+  // after the old editor has saved/discarded under its original context.
+  if(typeof _editorNeedsGuard==='function' && _editorNeedsGuard()
+      && !await guardUnsavedEditors()) return false;
+  if(typeof clearPreview==='function') clearPreview({bypassGuard:true, keepPanelOpen:true});
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
@@ -1858,7 +1884,7 @@ async function loadSession(sid){
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
-    if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
+    if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve && !(typeof navigationHasRoute === 'function' && navigationHasRoute())){
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
         return;
@@ -4295,6 +4321,7 @@ function _sessionUrlForSid(sid){
   return base.pathname+base.search+base.hash;
 }
 function _setActiveSessionUrl(sid){
+  if (typeof navigationSessionUrl === 'function' && navigationSessionUrl(sid)) return;
   if(typeof window==='undefined'||!window.history||!sid) return;
   const next=_sessionUrlForSid(sid);
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
@@ -6475,6 +6502,9 @@ function stopGatewaySSE(){
 
 let _searchDebounceTimer = null;
 let _contentSearchResults = [];  // results from /api/sessions/search content scan
+let _sessionSearchGeneration = 0;
+let _sessionSearchController = null;
+let _sessionSearchState = {mode:'fast', status:'idle', cursor:null, skipped:0};
 let _lastSessionSearchQuery = '';
 let _hideSearchPreviewsAfterSelect = false;
 let _archivedSearchPagingQueryActive = false;
@@ -6613,12 +6643,16 @@ function _sessionSearchDirectAndTitleMatches(sessions, query){
 }
 
 function _sessionSearchMergeMatches(sessions, query, contentResults){
+  if(typeof _syncSessionSearchOwner==='function' && _syncSessionSearchOwner()){
+    contentResults=[];
+    _renderSessionSearchStatus();
+  }
   const source=String(query||'').trim();
   if(!source) return sessions||[];
   const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(sessions,source);
   const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));
   return [
-    ...directAndTitleMatches,
+    ...directAndTitleMatches.map(s=>Object.assign({},s,(contentResults||[]).find(hit=>hit.session_id===s.session_id)||{})),
     ...(contentResults||[]).filter(s=>s&&s.match_type==='content'&&!directOrTitleIds.has(s.session_id))
   ];
 }
@@ -6653,12 +6687,149 @@ function _syncArchivedSearchPagingRefresh(query){
   if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false});
 }
 
+function _sessionSearchScope(){
+  return S.activeProfile || 'default';
+}
+
+function _sessionSearchOwner(query){
+  return JSON.stringify([_sessionSearchScope(),
+    typeof _profileSwitchGeneration==='number'?_profileSwitchGeneration:0, query]);
+}
+
+function _syncSessionSearchOwner(){
+  const query=($('sessionSearch')?.value||'').trim();
+  if(!_sessionSearchState.owner || _sessionSearchState.owner===_sessionSearchOwner(query)) return false;
+  ++_sessionSearchGeneration;
+  clearTimeout(_searchDebounceTimer);
+  if(_sessionSearchController) _sessionSearchController.abort();
+  _sessionSearchController=null;
+  _contentSearchResults=[];
+  _sessionSearchState={mode:'fast',status:'idle',cursor:null,skipped:0,owner:_sessionSearchOwner(query)};
+  return true;
+}
+
+function _sessionSearchText(key, fallback){
+  const value=t(key);
+  return value && value!==key?value:fallback;
+}
+
+function _renderSessionSearchStatus(){
+  _syncSessionSearchOwner();
+  const input=$('sessionSearch');
+  if(!input || !input.closest) return;
+  let box=$('sessionSearchStatus');
+  if(!box){
+    box=document.createElement('div');box.id='sessionSearchStatus';
+    box.style.cssText='font-size:12px;color:var(--muted);padding-top:6px;';
+    input.closest('.session-search').appendChild(box);
+  }
+  box.replaceChildren();
+  if(!input.value.trim()) return;
+  const state=_sessionSearchState;
+  const note=document.createElement('div');note.setAttribute('role','status');
+  const key=state.status==='error'?'search_failed':state.status==='loading'?'search_loading':
+    state.status==='cancelled'?'search_cancelled':state.skipped?'search_incomplete':
+    state.mode==='full'?(state.cursor?'search_partial':'search_saved_scope'):'search_fast_scope';
+  note.textContent=state.capped?_sessionSearchText('search_capped','Showing the first 240 matches. More may exist. Refine your search or restart; existing results are kept.'):t(key);box.appendChild(note);
+  if(state.status==='ready' && !_contentSearchResults.length && !_sessionSearchDirectAndTitleMatches(_allSessions,input.value.trim()).length){
+    const empty=document.createElement('div');empty.textContent=t('search_empty_scope');box.appendChild(empty);
+  }
+  const button=document.createElement('button');button.type='button';button.className='btn btn-sm';
+  button.style.cssText='max-width:100%;white-space:normal;margin-top:4px;';
+  button.textContent=state.capped?_sessionSearchText('search_restart','Restart search'):t(state.status==='loading'?'search_cancel':state.cursor?'search_continue':'search_full');
+  button.onclick=()=>state.status==='loading'?cancelSessionHistorySearch():searchSessionHistory({restart:!!state.capped});
+  box.appendChild(button);
+  if(state.capped){
+    const refine=document.createElement('button');refine.type='button';refine.className='btn btn-sm';
+    refine.textContent=_sessionSearchText('search_refine','Refine search');
+    refine.onclick=()=>{input.focus();input.select();};box.appendChild(refine);
+  }
+}
+
+function cancelSessionHistorySearch(){
+  ++_sessionSearchGeneration;
+  clearTimeout(_searchDebounceTimer);
+  if(_sessionSearchController) _sessionSearchController.abort();
+  _sessionSearchController=null;
+  _sessionSearchState.status='cancelled';
+  _renderSessionSearchStatus();
+}
+
+async function searchSessionHistory(options={}){
+  _syncSessionSearchOwner();
+  if(_sessionSearchState.capped && !options.restart) return;
+  const q=($('sessionSearch').value||'').trim();
+  if(!q) return;
+  clearTimeout(_searchDebounceTimer);
+  if(_sessionSearchController) _sessionSearchController.abort();
+  const generation=++_sessionSearchGeneration, profile=_sessionSearchScope();
+  const owner=_sessionSearchOwner(q);
+  const cursor=!options.restart && _sessionSearchState.owner===owner && _sessionSearchState.mode==='full'?_sessionSearchState.cursor:null;
+  if(!cursor) _contentSearchResults=[];
+  _hideSearchPreviewsAfterSelect=false;
+  _sessionSearchState={mode:'full',status:'loading',cursor,skipped:cursor?_sessionSearchState.skipped:0,owner,capped:false};
+  const controller=new AbortController();_sessionSearchController=controller;
+  const owns=()=>generation===_sessionSearchGeneration && owner===_sessionSearchOwner(($('sessionSearch').value||'').trim());
+  _renderSessionSearchStatus();
+  try{
+    const data=await api(`/api/sessions/search?q=${encodeURIComponent(q)}&scope=full&cursor=${encodeURIComponent(cursor||'')}`,{signal:controller.signal,timeoutMs:10000});
+    if(!owns()) return;
+    if(!data || !Array.isArray(data.sessions) || data.active_profile!==profile) throw new Error('Search unavailable');
+    const existing=new Set(_contentSearchResults.map(s=>s.session_id));
+    const incoming=data.sessions.filter(s=>{
+      if(existing.has(s.session_id)) return false;
+      existing.add(s.session_id);return true;
+    });
+    const remaining=Math.max(0,240-_contentSearchResults.length);
+    _contentSearchResults.push(...incoming.slice(0,remaining));
+    // Keep the first results stable. Never silently evict earlier matches.
+    _sessionSearchState.capped=incoming.length>remaining || (_contentSearchResults.length===240 && !!data.next_cursor);
+    _sessionSearchState.cursor=_sessionSearchState.capped?null:data.next_cursor;
+    _sessionSearchState.skipped+=Number(data.skipped)||0;
+    _sessionSearchState.status=_sessionSearchState.capped?'capped':'ready';
+    renderSessionListFromCache();
+  }catch(error){if(owns()) _sessionSearchState.status='error';}
+  finally{if(owns()){_sessionSearchController=null;_renderSessionSearchStatus();}}
+}
+
+async function _openSessionSearchResult(session){
+  const profile=_sessionSearchScope(), owner=_sessionSearchOwner('');
+  if(session.profile && session.profile!==profile) return;
+  await _openSidebarSession(session,{skipLineageResolve:true});
+  if(S.session?.session_id!==session.session_id || owner!==_sessionSearchOwner('')) return;
+  const generation=_loadSessionGeneration, location=session.match_location;
+  if(!location) return;
+  try{
+    // Explicit result-open only; reuse the authoritative hydration/ownership guards.
+    await expandFullTranscript();
+    if(generation!==_loadSessionGeneration || S.session?.session_id!==session.session_id || owner!==_sessionSearchOwner('')) return;
+    const messages=S.messages||[];
+    let index=location.message_uid?messages.findIndex(m=>m.message_uid===location.message_uid):-1;
+    if(index<0 && !location.message_uid && location.unique_text && messages.length===location.message_count) index=location.index;
+    const message=messages[index];
+    if(!message || message.role!==location.role) throw new Error('Location changed');
+    const body=Array.isArray(message.content)?message.content.filter(p=>p?.type==='text').map(p=>String(p.text||'')).join(' '):String(message.content||'');
+    const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(body));
+    const hash=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
+    if(generation!==_loadSessionGeneration || S.session?.session_id!==session.session_id || owner!==_sessionSearchOwner('')) return;
+    if(hash!==location.text_sha256) throw new Error('Location changed');
+    await jumpToTurnQuestion(index,index);
+  }catch(error){if(generation===_loadSessionGeneration && owner===_sessionSearchOwner('')) showToast(t('search_location_changed'));}
+}
+
 function filterSessions(){
   // Immediate client-side title filter (no flicker)
   // Debounced content search via API for message text
   syncSessionSearchClear();
   const q = ($('sessionSearch').value || '').trim();
   _syncArchivedSearchPagingRefresh(q);
+  const generation=++_sessionSearchGeneration, profile=_sessionSearchScope();
+  if(_sessionSearchController) _sessionSearchController.abort();
+  _sessionSearchController=null;
+  const owner=_sessionSearchOwner(q);
+  _sessionSearchState={mode:'fast',status:q?'loading':'idle',cursor:null,skipped:0,owner};
+  _contentSearchResults=[];
+  _renderSessionSearchStatus();
   if(q!==_lastSessionSearchQuery){
     _lastSessionSearchQuery=q;
     _hideSearchPreviewsAfterSelect=false;
@@ -6671,12 +6842,19 @@ function filterSessions(){
     try {
       const data = await api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=5`);
       const currentQ = ($('sessionSearch').value || '').trim();
-      if(currentQ!==requestedQ) return;
+      if(currentQ!==requestedQ || generation!==_sessionSearchGeneration || owner!==_sessionSearchOwner(currentQ)) return;
+      if(!data || !Array.isArray(data.sessions)) throw new Error('Search unavailable');
       const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);
       const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));
       _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !directOrTitleIds.has(s.session_id));
       renderSessionListFromCache();
-    } catch(e) { /* ignore */ }
+      _sessionSearchState.status='ready';
+      _renderSessionSearchStatus();
+    } catch(e) {
+      if(generation===_sessionSearchGeneration && owner===_sessionSearchOwner(($('sessionSearch').value||'').trim())){
+        _sessionSearchState.status='error';_renderSessionSearchStatus();
+      }
+    }
   }, 350);
 }
 
@@ -9025,7 +9203,8 @@ function renderSessionListFromCache(){
         if(_renamingSid) return;
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-          await _openSidebarSession(s);
+          if(s.match_location) await _openSessionSearchResult(s);
+          else await _openSidebarSession(s);
         }finally{
           el.classList.remove('loading');
         }
@@ -9114,6 +9293,7 @@ if(typeof window!=='undefined'){
     void _handleShowAllProfilesStorageEvent(e);
   });
   window.addEventListener('popstate', () => {
+    if (typeof navigationPopState === 'function') { navigationPopState(); return; }
     const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
     if(!sid || (S.session && S.session.session_id===sid)) return;
     // Refuse to switch sessions mid-stream — same UX guard the storage-event

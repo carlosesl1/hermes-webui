@@ -1,5 +1,6 @@
 """Regression test for the settings search dropdown escaping settings menu clipping."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,7 @@ def test_issue5250_settings_search_dropdown_escape():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True,
+            executable_path=os.environ.get("CHROMIUM_PATH"),
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
         page = browser.new_page(viewport={"width": 480, "height": 320})

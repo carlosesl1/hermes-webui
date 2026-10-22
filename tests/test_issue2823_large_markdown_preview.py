@@ -77,7 +77,8 @@ def test_large_markdown_fallback_sets_raw_content_before_size_gate():
     assert gate_pos != -1, "Markdown preview gate must be bypassable by forceRichMarkdown"
     assert fallback_pos != -1, "Large Markdown preview must fall back to plain text"
     assert rich_pos != -1, "Small Markdown preview must still use rich Markdown mode"
-    assert force_pos < raw_pos < gate_pos < fallback_pos < rich_pos
+    assert raw_pos < gate_pos < fallback_pos < rich_pos
+    assert "const cachedMarkdown = forceRichMarkdown && _previewOwns(_previewOwner)" in WORKSPACE_JS
 
 
 def test_large_markdown_fallback_uses_code_view_without_rich_render_or_katex():
@@ -109,8 +110,9 @@ def test_force_rich_markdown_reuses_preview_raw_content_without_refetch():
     # #3378 review (Codex): the cache reuse is guarded on _previewRawContentPath
     # (the path the cached content belongs to), NOT the tautological
     # path===_previewCurrentPath (that var was just assigned above).
-    assert "forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent" in branch
-    assert "? {content:_previewRawContent}" in branch
+    assert "const cachedMarkdown = forceRichMarkdown && _previewOwns(_previewOwner)" in WORKSPACE_JS
+    assert "&& path === _previewRawContentPath ? _previewRawContent" in WORKSPACE_JS
+    assert "? {content:cachedMarkdown}" in branch
     assert "_previewRawContentPath = path" in branch
     # The old tautological guard must be gone.
     assert "path===_previewCurrentPath&&_previewRawContent" not in branch
@@ -120,7 +122,7 @@ def test_save_updates_cached_raw_content_for_force_render():
     """#3378 review (Codex): saving a markdown file from the plain-text fallback
     must refresh _previewRawContent (and its path) so a later force-render shows the
     saved text, not the stale pre-edit fetch."""
-    save_idx = WORKSPACE_JS.find("const saved=await api(_previewSaveRoute||'/api/file/save'")
+    save_idx = WORKSPACE_JS.find("const saved=await api(ticket.d.saveRoute,")
     assert save_idx != -1, "file save call not found"
     save_block = WORKSPACE_JS[save_idx:save_idx + 1500]
     assert "const savedContent=saved&&typeof saved.content==='string'?saved.content:content;" in save_block

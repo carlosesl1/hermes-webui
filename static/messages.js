@@ -263,12 +263,12 @@ function _chatPayloadModelState(){
 
 function _deferStreamErrorIfOffline(){
   if(typeof isOfflineBannerVisible==='function' && isOfflineBannerVisible()){
-    setComposerStatus(t('offline_stream_waiting'));
+    setComposerStatus(t('offline_stream_waiting'),undefined,'recovery');
     return true;
   }
   if(typeof showOfflineBanner==='function' && navigator.onLine===false){
     showOfflineBanner('browser');
-    setComposerStatus(t('offline_stream_waiting'));
+    setComposerStatus(t('offline_stream_waiting'),undefined,'recovery');
     return true;
   }
   return false;
@@ -1495,6 +1495,12 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 }
 
 async function send(){
+  const _resume=(arguments[0]||{}).attachmentSubmission||null;
+  let _ownedAttachmentSubmission=null;
+  const _pendingAttachment=typeof _attachmentSubmissionCurrent==='function'?_attachmentSubmissionCurrent():null;
+  if(typeof _attachmentSendInProgress!=='undefined'&&_attachmentSendInProgress)return;
+  if(_pendingAttachment&&!_resume){renderTray();return;}
+  if(_resume&&(_resume!==_pendingAttachment||S.busy))return;
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -1521,13 +1527,13 @@ async function send(){
   try{
   const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
-  let text=$('msg').value.trim();
-  if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  let text=_resume?_resume.text:$('msg').value.trim();
+  if(!text&&!(_resume?_resume.files:S.pendingFiles).length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
-  _flushSelectionBlocksToComposer();
-  text=$('msg').value.trim();
-  if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  if(!_resume)_flushSelectionBlocksToComposer();
+  text=_resume?_resume.text:$('msg').value.trim();
+  if(!text&&!(_resume?_resume.files:S.pendingFiles).length){_sendInProgress=false;_sendInProgressSid=null;return;}
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
     if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
     _sendInProgress=false;_sendInProgressSid=null;
@@ -1623,7 +1629,7 @@ async function send(){
   // their assistant response synchronously.  If we pushed AFTER, S.messages
   // would be [assistant, user] and the chat would show the response above
   // the user's own input — reverse chronological order (#840 ordering bug).
-  if(text.startsWith('/')&&!S.pendingFiles.length&&!literalSlash){
+  if(!_resume&&text.startsWith('/')&&!S.pendingFiles.length&&!literalSlash){
     const _parsedCmd=parseCommand(text);
     const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
     if(_cmd){
@@ -1760,6 +1766,10 @@ async function send(){
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
+  const _submissionGeneration=typeof _loadSessionGeneration==='undefined'?0:_loadSessionGeneration;
+  const _submissionProfile=S.activeProfile||S.session.profile||'default';
+  const _submissionModel=_resume?_resume.model:_chatPayloadModelState();
+  const _submissionWorkspace=_resume?_resume.workspace:S.session.workspace;
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
@@ -1773,7 +1783,7 @@ async function send(){
   // signature from here down; no code path below re-reads $('msg').value on the
   // happy path.
   const _submittedDraftTextForClear=$('msg').value||'';
-  $('msg').value='';autoResize();
+  if(!_resume){$('msg').value='';autoResize();}
 
   // #5912 gate CORE fix: snapshot the pending files that belong to THIS send
   // BEFORE the await, and upload exactly that snapshot. Otherwise a re-entrant /
@@ -1781,9 +1791,12 @@ async function send(){
   // S.pendingFiles and later re-uploads the first send's attachment. Detach the
   // snapshot from S.pendingFiles now so files staged AFTER this point belong to
   // the next send only.
-  const _submittedFiles=[...(S.pendingFiles||[])];
+  const _submittedFiles=[...(_resume?_resume.files:(S.pendingFiles||[]))];
   const _submittedDraftFilesForClear=[..._submittedFiles];
-  S.pendingFiles=[];
+  const _submission=_resume||(_submittedFiles.length?{key:_attachmentOwner(activeSid,_submissionProfile),sid:activeSid,profile:_submissionProfile,text,files:_submittedFiles,model:_submissionModel,workspace:_submissionWorkspace}:null);
+  _ownedAttachmentSubmission=_submission;
+  if(_submission){_submission.status='uploading';_attachmentSendInProgress=true;_attachmentSubmissionSave(_submission);}
+  if(!_resume)S.pendingFiles=[];
   if(typeof renderTray==='function')renderTray();
 
   // #5912 gate SILENT fix: clear the PERSISTED draft here — alongside the
@@ -1791,12 +1804,28 @@ async function send(){
   // window is not clobbered by a delayed text:'' post. Keep the promise so the
   // #5472 failed-send restore can chain its re-persist after this clear resolves.
   let _composerDraftClearPromise=null;
-  if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  if(!_resume){
+    if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  }
 
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
-  try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  try{
+    if(_resume&&options.omitFailedAttachments){
+      uploaded=_submittedFiles.map(f=>_attachmentResult(f,_submission.key)).filter(Boolean);
+      if(!text&&!uploaded.length){_submission.status='pending';_attachmentSubmissionSave(_submission);renderTray();return;}
+    }else uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, profile:_submissionProfile, clearPending:false});
+  }catch(e){
+    if(_submission){_submission.status='pending';_attachmentSubmissionSave(_submission);renderTray();}
+    if(!_submission||_attachmentSubmissionOwned(_submission,_submissionGeneration))setComposerStatus('');
+    return;
+  }
+  if(_submission){
+    _attachmentSubmissionSave(_submission);
+    if(!_attachmentSubmissionOwned(_submission,_submissionGeneration)){
+      _submission.status='pending';renderTray();return;
+    }
+  }
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
@@ -1829,6 +1858,7 @@ async function send(){
       }
     }
   }
+  if(_submission&&!_attachmentSubmissionOwned(_submission,_submissionGeneration)){_submission.status='pending';renderTray();return;}
   if(!msgText){setComposerStatus('Nothing to send');return;}
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
@@ -1913,8 +1943,9 @@ async function send(){
   let postStartData;
   let modelStateForPostStart;
   let explicitPickForPostStart;
+  let _acceptedAttachment=false;
   try{
-    const _modelState=_chatPayloadModelState();
+    const _modelState=_submissionModel;
     modelStateForPostStart=_modelState;
     const _pendingPick=(typeof _readPendingSessionModel==='function')
       ? _readPendingSessionModel(activeSid)
@@ -1944,20 +1975,42 @@ async function send(){
     // pick. (#3739/#3737, Codex catch)
     if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
     explicitPickForPostStart=_explicitPick;
-    const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
+    const startData=await api('/api/chat/start',{method:'POST',retries:_submission?0:2,body:JSON.stringify({
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
-      model:_modelState.model,workspace:S.session.workspace,
+      model:_modelState.model,workspace:_submissionWorkspace,
       model_provider:_modelState.model_provider,
-      profile:S.activeProfile||S.session.profile||'default',
+      profile:_submissionProfile,
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined
     })});
+    if(_submission&&(!startData||!startData.stream_id))throw new Error('Message was not accepted');
+    _acceptedAttachment=!!_submission;
     _pendingMoaConfig=null;
     postStartData = startData;
+    if(_submission){
+      _attachmentSubmissionFinish(_submission);
+      if(!_attachmentSubmissionOwned(_submission,_submissionGeneration)){
+        if(INFLIGHT[activeSid])Object.assign(INFLIGHT[activeSid],{streamId:startData.stream_id,reattach:true});
+        if(typeof renderSessionList==='function')void renderSessionList();
+        return;
+      }
+    }
   }catch(e){
+    if(_submission){
+      if(_acceptedAttachment)return; // A post-acceptance UI error must never make this turn retryable.
+      _submission.status='pending';_attachmentSubmissionSave(_submission);renderTray();
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function')clearInflightState(activeSid);
+      if(_attachmentSubmissionOwned(_submission,_submissionGeneration)){
+        S.messages=S.messages.filter(m=>m!==userMsg);
+        stopApprovalPolling();stopClarifyPolling();removeThinking();
+        renderMessages();setBusy(false);setComposerStatus(String(e.message||e));
+      }
+      return;
+    }
     const errMsg=String((e&&e.message)||'');
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
@@ -2013,12 +2066,12 @@ async function send(){
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`,undefined,'error');
     // #5472: the send was rejected before the turn was durably started, so the
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
     // payload) and re-stage files so the user can re-send without retyping.
-    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);
+    if(!_submission)_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
@@ -2097,7 +2150,13 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
-  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+  }finally{
+    _sendInProgress=false;_sendInProgressSid=null;
+    if(typeof _attachmentSendInProgress!=='undefined')_attachmentSendInProgress=false;
+    if(_ownedAttachmentSubmission&&_attachmentSubmissions.get(_ownedAttachmentSubmission.key)===_ownedAttachmentSubmission&&_ownedAttachmentSubmission.status==='uploading'){
+      _ownedAttachmentSubmission.status='pending';_attachmentSubmissionSave(_ownedAttachmentSubmission);renderTray();
+    }
+  }
 }
 
 async function startRegeneration(sessionId, regenerationRevision){
@@ -2824,7 +2883,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   function _deferStreamErrorIfPageHidden(source){
     if(!_pageHiddenForStreamError()) return false;
-    setComposerStatus('Connection paused. Reconnecting when this tab returns…');
+    setComposerStatus('Connection paused. Reconnecting when this tab returns…',undefined,'recovery');
     if(S.session&&S.session.session_id===activeSid&&streamId) S.activeStreamId=streamId;
     if(!_deferredStreamRecoveryBound){
       _deferredStreamRecoveryBound=true;
@@ -6945,7 +7004,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
         const _retryDelays=[1500,3000,5000,8000,12000,20000];
-        setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
+        setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`,undefined,'recovery');
         const _probeReconnect=async(attempt=0)=>{
           if(_terminalStateReached || _streamFinalized) return;
           if(!_isSessionCurrentPane(activeSid)) return;
@@ -6957,7 +7016,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               return;
             }
             if(st&&st.replay_available){
-              setComposerStatus('Restoring stream…');
+              setComposerStatus('Restoring stream…',undefined,'recovery');
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
@@ -6969,7 +7028,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(_deferStreamErrorIfPageHidden(source)) return;
           const nextDelay=_retryDelays[attempt+1];
           if(nextDelay){
-            setComposerStatus(`Reconnecting… (${attempt+2}/${_retryDelays.length})`);
+            setComposerStatus(`Reconnecting… (${attempt+2}/${_retryDelays.length})`,undefined,'recovery');
             setTimeout(()=>{void _probeReconnect(attempt+1);}, nextDelay);
             return;
           }
@@ -6978,7 +7037,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // status) and can recover a completed response without an error banner.
           // This is especially important on iOS where Tailscale reconnects can
           // take longer than the retry window.
-          setComposerStatus('Restoring session…');
+          setComposerStatus('Restoring session…',undefined,'recovery');
           let _restoreTimedOut=false;
           const _restoreTimer=setTimeout(()=>{
             // If _restoreSettledSession hangs (flaky Tailscale), don't leave
@@ -9242,7 +9301,7 @@ function _startClarifyFallbackPoll(sid) {
       if (isMissingEndpoint) {
         if (!_clarifyMissingEndpointWarned) {
           _clarifyMissingEndpointWarned = true;
-          setComposerStatus("Clarify unavailable on current server build. Restart server.");
+          setComposerStatus("Clarify unavailable on current server build. Restart server.",undefined,"error");
           if (typeof showToast === "function") {
             showToast("Clarify endpoint unavailable. Please restart server.", 5000);
           }

@@ -44,7 +44,7 @@ def test_clear_preview_can_keep_preview_only_panel_open_for_directory_navigation
 def test_load_dir_keeps_workspace_panel_open_when_clearing_preview():
     """#1785: loadDir('.') from the ~ breadcrumb should reveal the listing, not collapse the panel."""
     block = _function_block(WORKSPACE_JS, "loadDir")
-    assert "clearPreview({keepPanelOpen:true})" in block.replace(" ", ""), (
+    assert "clearPreview({keepPanelOpen:true,bypassGuard:true})" in block.replace(" ", ""), (
         "Directory navigation clears previews as part of showing the file tree; that clear "
         "must keep the workspace panel open for breadcrumb navigation from preview mode."
     )

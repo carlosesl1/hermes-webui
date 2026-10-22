@@ -1488,6 +1488,8 @@ def _cron_job_for_api(job: dict) -> dict:
     explicitly muted.
     """
     payload = dict(job or {})
+    from api.cron import scheduler_timezone
+    payload["scheduler_timezone"] = scheduler_timezone()
     payload.setdefault("profile", None)
     payload["toast_notifications"] = payload.get("toast_notifications") is not False
     return payload
@@ -14536,9 +14538,16 @@ def handle_get(handler, parsed) -> bool:
         active_profile = _get_active_profile_name() or "default"
         try:
             active_jobs, other_jobs = _cron_jobs_cross_profile(active_profile)
+            from api.cron import scheduler_metadata
+            from api.profiles import cron_profile_context
+            with cron_profile_context():
+                metadata = scheduler_metadata()
         except ModuleNotFoundError as exc:
             if exc.name in ("cron", "cron.jobs"):
-                return j(handler, {"jobs": [], "cron_unavailable": True})
+                return j(handler, {"jobs": [], "cron_unavailable": True,
+                                   "active_profile": active_profile,
+                                   "scheduler_timezone": None,
+                                   "schedule_preview_supported": False})
             raise
         all_profiles = _all_profiles_enabled(parsed)
         jobs = active_jobs + other_jobs if all_profiles else active_jobs
@@ -14548,7 +14557,21 @@ def handle_get(handler, parsed) -> bool:
             "all_profiles": all_profiles,
             "active_profile": active_profile,
             "other_profile_count": hidden_other_count,
+            **metadata,
         })
+
+    if parsed.path == "/api/crons/preview":
+        # Read-only: no job IDs, persistence, execution or browser timezone.
+        schedules = parse_qs(parsed.query, keep_blank_values=True).get("schedule", [])
+        if len(schedules) != 1 or not schedules[0].strip() or len(schedules[0]) > 1024:
+            return bad(handler, "Provide one non-empty schedule (maximum 1024 characters)")
+        from api.cron import preview_schedule
+        from api.profiles import cron_profile_context
+        with cron_profile_context():
+            _ensure_agent_cron_import_path()
+            result = preview_schedule(schedules[0])
+            result["active_profile"] = _get_active_profile_name() or "default"
+            return j(handler, result)
 
     if parsed.path == "/api/crons/output":
         from api.profiles import cron_profile_context
@@ -18085,6 +18108,24 @@ def _handle_sessions_search(handler, parsed):
         _search_redact_enabled = bool(load_settings().get("api_redact_enabled", True))
     except Exception:
         _search_redact_enabled = True  # fail safe: redact when settings unreadable
+    if qs.get("scope", [""])[0] == "full" and q:
+        from api.config import SESSION_DIR
+        from api.session_search import search_saved_history
+        try:
+            payload = search_saved_history(
+                sessions, q, qs.get("cursor", [""])[0], SESSION_DIR,
+                _session_search_message_text, _session_search_preview,
+                active_profile=active_profile, all_profiles=all_profiles,
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        for item in payload["sessions"]:
+            item["match_preview"] = _redact_text(item["match_preview"], _enabled=_search_redact_enabled)
+            if isinstance(item.get("title"), str):
+                item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
+            _redact_sidebar_title_fields(item, _search_redact_enabled)
+        payload.update(query=q, active_profile=active_profile, all_profiles=all_profiles)
+        return j(handler, payload)
     if not q:
         safe_sessions = []
         for s in sessions:
