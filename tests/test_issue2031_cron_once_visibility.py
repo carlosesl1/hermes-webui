@@ -397,7 +397,7 @@ console.log(JSON.stringify({
 """
     result = json.loads(_run_node(script))
 
-    assert result["warning"] == ""
+    assert result["warning"] == "none"  # no authoritative scheduler response yet
     assert result["inputListeners"] == 1
     assert result["presetChangeListeners"] == 1
 
@@ -487,7 +487,8 @@ def test_cron_form_surfaces_one_shot_warning_copy_markers_and_preset_markup():
     assert "id=\"cronFormScheduleWeekday\"" in panels
     assert "id=\"cronFormScheduleMonthDay\"" in panels
     assert "id=\"cronFormSchedulePreview\"" in panels
-    assert "cron_schedule_once_warning" in panels
+    assert "cron_preview_once" in panels
+    assert "data.schedule?.kind === 'once'" in panels
     assert "_cronSchedulePresetIdForValue" in panels
     assert "_cronSchedulePresetOptionHtml" in panels
     assert "_initCronSchedulePresetControls" in panels
@@ -508,7 +509,7 @@ def test_cron_form_surfaces_one_shot_warning_copy_markers_and_preset_markup():
     assert ".cron-schedule-preview" in style
     # Time input is themed to match the other form controls (not bare native chrome).
     assert "input[type=\"time\"]" in style
-    assert "cron_schedule_time_hint" in panels
+    assert "cron_effective_timezone" in panels  # effective backend zone, not a guessed local hint
     assert "fields: ['minute']" in panels
     assert "fields: ['time']" in panels
     assert "fields: ['weekday', 'time']" in panels

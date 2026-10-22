@@ -391,6 +391,8 @@ eval(extractFunc('_scheduleMessageJumpScrollReconcile'));
 eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
+const PROGRAMMATIC_SCROLL_VALID_MS=150;
+eval(extractFunc('_freshProgrammaticScrollActive'));
 eval(extractFunc('_highlightQuestionRow'));
 eval(extractFunc('jumpToTurnQuestion'));
 eval(extractFunc('refreshActiveSessionIfExternallyUpdated'));
@@ -791,3 +793,31 @@ console.log(JSON.stringify({
         "messageUserUnpinned": True,
         "scrollPinned": False,
     }, "A wheel-down during the jump owner window must also unpin the reader (#6621 S3)."
+
+
+def test_explicit_jump_supersedes_hydration_snapshot_before_next_paint():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + r"""
+let _scrollPinned=true,_messageUserUnpinned=false,_nearBottomCount=2;
+let _programmaticScroll=false,_programmaticScrollSetAt=0;
+let _messageJumpScrollGeneration=0,_messageJumpScrollOwner=null,_messageJumpScrollSettleTimer=0;
+let _messageScrollInputGeneration=0,_lastScrollTop=4500,_lastMessageClientHeight=500,_newMessageCueVisible=false;
+const S={session:{session_id:'A'}};
+const container={scrollHeight:5000,clientHeight:500,scrollTop:4500};
+const $=()=>container;
+let restoreWrites=0,abandoned=0;
+function _restorePinnedMessageScrollSnapshot(){restoreWrites++;container.scrollTop=4500;return true;}
+function _abandonMessageScrollSnapshot(){abandoned++;}
+for(const name of ['_messageJumpSessionId','_scheduleMessageJumpScrollReconcile','_beginMessageJumpScroll','_finishMessageJumpScroll','_messageScrollSnapshotInputChanged','_restoreMessageScrollSnapshot']) eval(extractFunc(name));
+const old={sessionId:'A',inputGeneration:0,pinned:true};
+const generation=_beginMessageJumpScroll(container);
+_restoreMessageScrollSnapshot(old);
+const during={writes:restoreWrites,pin:_scrollPinned,owner:!!_messageJumpScrollOwner};
+container.scrollTop=900;
+_finishMessageJumpScroll(generation);
+_restoreMessageScrollSnapshot(old);
+console.log(JSON.stringify({during,generation:_messageScrollInputGeneration,abandoned,writes:restoreWrites,top:container.scrollTop,pin:_scrollPinned}));
+"""
+    result = json.loads(_run_node(source))
+    assert result == {"during":{"writes":0,"pin":False,"owner":True},
+                      "generation":1,"abandoned":1,"writes":0,"top":900,"pin":False}

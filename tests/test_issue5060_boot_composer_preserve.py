@@ -84,6 +84,7 @@ function updateSendBtn() {{
 let _loadingSessionId = null;
 const sid = 'boot-session';
 const S = {{
+  pendingFiles: [],
   session: {{
     session_id: sid,
     composer_draft: {json.dumps(send_time_draft)},

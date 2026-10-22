@@ -58,7 +58,7 @@ def test_load_dir_supports_preserve_preview_option():
 def test_load_dir_still_clears_preview_for_directory_navigation():
     """#1785: explicit directory navigation must still switch preview back to browse mode."""
     block = _function_block(WORKSPACE_JS, "loadDir")
-    assert "clearPreview({keepPanelOpen:true})" in block.replace(" ", ""), (
+    assert "clearPreview({keepPanelOpen:true,bypassGuard:true})" in block.replace(" ", ""), (
         "Directory navigation must still clear previews when preservePreview is not set"
     )
 

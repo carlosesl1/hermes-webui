@@ -54,9 +54,11 @@ def _extract_workspace_block(start_marker: str, end_marker: str) -> str:
 
 
 def _extract_workspace_function(name: str) -> str:
-    marker = f"async function {name}("
+    marker = f"function {name}("
     start = WORKSPACE_JS.find(marker)
     assert start >= 0, f"{name} not found in static/workspace.js"
+    if WORKSPACE_JS[max(0, start - 6):start] == "async ":
+        start -= 6
     params_depth = 0
     body_start = -1
     for idx in range(start, len(WORKSPACE_JS)):
@@ -209,6 +211,7 @@ def test_openfile_download_only_path_preserves_existing_office_save_route():
     js = (
         _extract_workspace_block("const DOWNLOAD_EXTS = new Set([", "function fileExt")
         + "function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }\n"
+        + _extract_workspace_function("_previewContext")
         + _extract_workspace_function("openFile")
         + "\nconst S = { session: { session_id: 'sid-1' } };\n"
         + "let _previewServerEditable = true;\n"

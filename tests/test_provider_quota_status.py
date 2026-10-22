@@ -12,9 +12,11 @@ import threading
 import types
 import urllib.error
 from datetime import datetime, timezone
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import api.config as config
 import api.profiles as profiles
@@ -457,6 +459,191 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
     }
     assert primary_token not in output
     assert exhausted_token not in output
+
+
+@pytest.mark.parametrize("duration_key", ["limit_window_seconds", "duration_seconds"])
+def test_codex_account_usage_labels_windows_by_duration(monkeypatch, capsys, duration_key):
+    """Codex account windows must use provider duration semantics, not field position."""
+    import api.providers as providers
+
+    def b64url(payload: bytes) -> str:
+        return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+
+    def token_for(account_id: str) -> str:
+        return ".".join((
+            b64url(b'{"alg":"none","typ":"JWT"}'),
+            b64url(json.dumps({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": account_id,
+                },
+            }).encode("utf-8")),
+            b64url(b"signature"),
+        ))
+
+    weekly_token = token_for("acct-weekly-primary")
+    unknown_token = token_for("acct-unknown-duration")
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    account_usage_mod = types.ModuleType("agent.account_usage")
+    credential_pool_mod = types.ModuleType("agent.credential_pool")
+
+    def fake_fetch_account_usage(provider, *, base_url=None, api_key=None):
+        return None
+
+    class FakePool:
+        def entries(self):
+            return [
+                SimpleNamespace(
+                    label="Weekly primary",
+                    runtime_api_key=weekly_token,
+                    runtime_base_url="https://chatgpt.com/backend-api/codex",
+                    last_status=None,
+                ),
+                SimpleNamespace(
+                    label="Unknown duration",
+                    runtime_api_key=unknown_token,
+                    runtime_base_url="https://chatgpt.com/backend-api/codex",
+                    last_status=None,
+                ),
+            ]
+
+        def select(self):
+            raise AssertionError("quota display must not rotate credential_pool selection")
+
+    def fake_load_pool(provider):
+        return FakePool()
+
+    def fake_urlopen(req, timeout):
+        headers = {key.lower(): value for key, value in req.header_items()}
+        if headers.get("chatgpt-account-id") == "acct-unknown-duration":
+            payload = {
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": {
+                        duration_key: 12345,
+                        "used_percent": 45,
+                        "reset_at": "2030-03-18T12:30:00Z",
+                    },
+                    "secondary_window": None,
+                    "additional_limits": None,
+                },
+            }
+        else:
+            payload = {
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": {
+                        duration_key: 604800,
+                        "used_percent": 25,
+                        "reset_at": "2030-03-24T12:30:00Z",
+                    },
+                    "secondary_window": None,
+                    "additional_limits": None,
+                },
+                "credits": {"has_credits": True, "balance": 12.5},
+            }
+        return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    account_usage_mod.fetch_account_usage = fake_fetch_account_usage
+    credential_pool_mod.load_pool = fake_load_pool
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", credential_pool_mod)
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", "openai-codex", ""])
+
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, {"__name__": "__main__"})
+
+    output = capsys.readouterr().out.strip()
+    snapshot = json.loads(output)
+
+    assert [w["label"] for w in snapshot["windows"]] == ["Weekly", "Window"]
+    assert [w["label"] for w in snapshot["pool"]["best_remaining_by_window"]] == ["Weekly", "Window"]
+    assert snapshot["pool"]["credentials"][0]["windows"][0]["label"] == "Weekly"
+    unknown_window = snapshot["pool"]["credentials"][1]["windows"][0]
+    assert unknown_window["label"] == "Window"
+    assert unknown_window["detail"] == "Duration: 12345 seconds"
+    assert weekly_token not in output
+    assert unknown_token not in output
+
+
+@pytest.fixture
+def codex_usage_helpers(monkeypatch):
+    """Load the actual child code without importing core or probing credentials."""
+    import api.providers as providers
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    usage_mod = types.ModuleType("agent.account_usage")
+    usage_mod.fetch_account_usage = lambda *_args, **_kwargs: None
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", usage_mod)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", "--worker"])
+    monkeypatch.setattr(sys, "stdin", StringIO(""))
+    namespace = {"__name__": "__main__"}
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, namespace)
+    return namespace
+
+
+@pytest.mark.parametrize("window_key", ["primary_window", "secondary_window"])
+@pytest.mark.parametrize("seconds,label,detail", [
+    (604800, "Weekly", None),
+    ("604800", "Weekly", None),
+    (18000, "Session", None),
+    (12345, "Window", "Duration: 12345 seconds"),
+])
+def test_codex_raw_window_duration(codex_usage_helpers, window_key, seconds, label, detail):
+    rate_limit = {"primary_window": None, "secondary_window": None}
+    rate_limit[window_key] = {
+        "limit_window_seconds": seconds,
+        "used_percent": 25,
+        "reset_at": 1_900_000_000,
+    }
+    snapshot = codex_usage_helpers["_codex_snapshot_from_usage_payload"]({"rate_limit": rate_limit})
+    windows = codex_usage_helpers["_snapshot_windows_payload"](snapshot)
+    assert windows == [{
+        "label": label,
+        "used_percent": 25.0,
+        "remaining_percent": 75.0,
+        "reset_at": "2030-03-17T17:46:40Z",
+        "detail": detail,
+    }]
+
+
+def test_codex_raw_duration_precedes_alias(codex_usage_helpers):
+    snapshot = codex_usage_helpers["_codex_snapshot_from_usage_payload"]({
+        "rate_limit": {"primary_window": {
+            "limit_window_seconds": 604800, "duration_seconds": 18000, "used_percent": 25,
+        }},
+    })
+    assert snapshot.windows[0].label == "Weekly"
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("duration_key", ["limit_window_seconds", "duration_seconds"])
+def test_codex_nonfinite_duration_keeps_usable_window(codex_usage_helpers, value, duration_key):
+    snapshot = codex_usage_helpers["_codex_snapshot_from_usage_payload"]({
+        "rate_limit": {"primary_window": {duration_key: value, "used_percent": 25}},
+    })
+    assert snapshot.available is True
+    assert snapshot.windows[0].label == "Session"  # Existing no-valid-duration fallback.
+    assert snapshot.windows[0].detail is None
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "NaN", "Infinity", "-Infinity"])
+def test_codex_nonfinite_usage_is_not_available_quota(codex_usage_helpers, value):
+    snapshot = codex_usage_helpers["_codex_snapshot_from_usage_payload"]({
+        "rate_limit": {
+            "primary_window": {"limit_window_seconds": 604800, "used_percent": value},
+            "secondary_window": None,
+        },
+        "credits": {"has_credits": True, "balance": value},
+    })
+    assert snapshot.available is False
+    assert snapshot.windows == ()
+    assert snapshot.details == ()
+    json.dumps(codex_usage_helpers["_snapshot_payload"](snapshot), allow_nan=False)
 
 
 def test_codex_account_usage_subprocess_retries_expired_pool_exhaustion(monkeypatch, capsys):
