@@ -28,6 +28,19 @@ at 1440×900 and 522×1232; use an existing compatible Playwright runtime and
 specified in its module documentation. None of these gates implies live-provider
 or production deployment validation.
 
+## Node toolchain security baseline
+
+Docker and the lint/pytest CI jobs use **Node 22.23.4**, pinned in `.node-version`
+and the Docker donor stage. Local dev tooling also accepts patched Node 24/26
+branches listed in `package.json`; Node 20 is no longer a supported dev runtime.
+The baseline follows the [October 2026 Node security release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
+
+Run `node scripts/check_node_runtime.cjs` with the exact pinned version to verify
+Node, npm/npx, Brotli and crypto offline. `tests/test_node_runtime_policy.py`
+checks that Docker and CI stay aligned. This is a runtime smoke, not an exploit
+test or a security audit of npm packages. See [Docker runtime scope](docs/docker.md#node-runtime-security-baseline)
+for separately managed Hermes and Playwright binaries.
+
 ## Static JS runtime lint (brick-class regression guard)
 
 Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function

@@ -35,6 +35,22 @@ alone does not update any running instance.
 
 If something stops working, **start with the single-container setup** — it's the simplest path and fixes most permission/UID/path-mismatch issues by construction.
 
+## Node runtime security baseline
+
+The fork image includes **Node 22.23.4** and its bundled npm/npx from the official
+`node:22.23.4-bookworm-slim` image. The Python base and Python WebUI server are
+unchanged. The exact version is also recorded in `.node-version` for CI/dev tools.
+The image build runs `scripts/check_node_runtime.cjs`; Docker CI repeats it as the
+unprivileged runtime user with networking disabled.
+
+This covers `/usr/local/bin/node` in **newly rebuilt fork images**, not every Node
+executable reachable through a mount. Hermes-managed tool stores, a host-provided
+Node, Python Playwright's embedded driver, and separate agent/dashboard containers
+have independent update lifecycles. Inspect their actual executable versions and
+update them separately; a directory name is not proof of the binary's version.
+Existing containers must be deliberately rebuilt/recreated to receive this image
+change. A Git push does not update the running WebUI or its mounted tool stores.
+
 ## Production image security model
 
 The production Docker image is hardened for the normal single-tenant container threat model:

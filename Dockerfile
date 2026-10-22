@@ -1,4 +1,12 @@
+# Keep this exact security release aligned with .node-version.
+# Copy only Node/npm; the WebUI server and its base remain Python.
+FROM node:22.23.4-bookworm-slim AS node-runtime
 FROM python:3.12-slim
+
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 LABEL maintainer="nesquena"
 LABEL description="Hermes Web UI — browser interface for Hermes Agent"
@@ -131,6 +139,7 @@ USER root
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
 COPY --chown=root:root . /apptoo
+RUN node /apptoo/scripts/check_node_runtime.cjs
 
 # Bake the git version tag into the image so the settings badge works even
 # when .git is not present (it is excluded by .dockerignore).

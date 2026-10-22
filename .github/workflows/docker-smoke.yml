@@ -30,6 +30,8 @@ on:
     branches: [master]
     paths:
       - 'Dockerfile'
+      - '.node-version'
+      - 'scripts/check_node_runtime.cjs'
       - 'docker_init.bash'
       - 'webui_runtime.py'
       - 'scripts/write_distribution_metadata.py'
@@ -41,6 +43,8 @@ on:
     branches: [master]
     paths:
       - 'Dockerfile'
+      - '.node-version'
+      - 'scripts/check_node_runtime.cjs'
       - 'docker_init.bash'
       - 'webui_runtime.py'
       - 'scripts/write_distribution_metadata.py'
@@ -90,6 +94,11 @@ jobs:
           tags: hermes-webui:local
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify Node toolchain as the unprivileged runtime user
+        run: |
+          docker run --rm --network none --user 1024:1024 \
+            --entrypoint node hermes-webui:local /apptoo/scripts/check_node_runtime.cjs
 
   # Startup-health gate for UID/GID auto-detection (#7027).
   #

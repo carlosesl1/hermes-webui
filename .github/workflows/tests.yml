@@ -153,7 +153,11 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version-file: '.node-version'
+
+      - name: Verify Node toolchain
+        if: needs.changes.outputs.docs_only != 'true'
+        run: node scripts/check_node_runtime.cjs
 
       - name: Install ESLint
         if: needs.changes.outputs.docs_only != 'true'
@@ -198,6 +202,16 @@ jobs:
 
       - uses: actions/checkout@v4
         if: needs.changes.outputs.docs_only != 'true'
+
+      - name: Set up Node for JavaScript regression tests
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+
+      - name: Verify Node toolchain
+        if: needs.changes.outputs.docs_only != 'true'
+        run: node scripts/check_node_runtime.cjs
 
       - name: Set up Python ${{ matrix.python-version }}
         if: needs.changes.outputs.docs_only != 'true'
