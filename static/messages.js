@@ -1978,6 +1978,13 @@ async function send(){
       if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
       removeThinking();
       S.session=null;S.messages=[];
+      // The tray renders from S.todos whenever the todoStateMeta sentinel is
+      // present (_currentTodos in ui.js), so clearing the session alone left the
+      // deleted conversation's tasks on screen over an empty transcript. Drop
+      // the snapshot exactly like the other session-clearing paths do
+      // (clearConversation, deleteSession): hydrate against a null session,
+      // which resets S.todos/S.todoStateMeta and reschedules the tray paint.
+      if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
       setBusy(false);setComposerStatus('');
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
       if(typeof renderMessages==='function') renderMessages();
@@ -4707,7 +4714,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdImgSrcAllowed(v){
     const s=String(v||'');
     if(/^data:/i.test(s)) return typeof _isSafeDataImageUri==='function'&&_isSafeDataImageUri(s);
-    return _SMD_SAFE_IMG_URL_RE.test(s);
+    if(!_SMD_SAFE_IMG_URL_RE.test(s)) return false;
+    // #7941: a remote image outside the CSP img-src allowlist gets no src while
+    // streaming (nothing is fetched); the settled renderMd() pass then shows the
+    // inert click-to-open link.
+    return typeof _remoteImageAllowed!=='function'||_remoteImageAllowed(s);
   }
   function _smdLinkHref(raw){
     const href=String(raw||'');

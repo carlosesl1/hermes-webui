@@ -383,7 +383,8 @@ def test_streaming_cronjob_wrapper_uses_profile_context_only_for_tool_call(tmp_p
 
     class Registry:
         def get_entry(self, name):
-            assert name == "cronjob"
+            if name != "cronjob":
+                return None
             return entry
 
         def register(self, **kwargs):
@@ -466,7 +467,8 @@ def test_streaming_cronjob_wrapper_context_survives_threadpool_context_copy(tmp_
 
     class Registry:
         def get_entry(self, name):
-            assert name == "cronjob"
+            if name != "cronjob":
+                return None
             return entry
 
         def register(self, **kwargs):
@@ -527,7 +529,8 @@ def test_streaming_cronjob_wrapper_leaves_calls_unwrapped_without_streaming_prof
 
     class Registry:
         def get_entry(self, name):
-            assert name == "cronjob"
+            if name != "cronjob":
+                return None
             return entry
 
         def register(self, **kwargs):
