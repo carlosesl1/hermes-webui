@@ -8654,6 +8654,19 @@ function _navigateToSettingsField(entry) {
     if (!el) return;
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     _highlightSettingsField(el);
+    // Removing the search result also removes the keyboard's focused node.
+    // Hand focus to the live destination, without activating/toggling it or
+    // undoing the intentional centered scroll. Skip hidden/disabled controls.
+    const selector = 'input:not([type="hidden"]):not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"]):not(:disabled)';
+    const controls = el.querySelectorAll ? Array.from(el.querySelectorAll(selector)) : [];
+    if (el.matches && el.matches(selector)) controls.unshift(el);
+    const control = controls.find(node => node.getClientRects().length && !node.closest('[inert], [aria-hidden="true"]'));
+    const target = control || el;
+    if (!control && !el.hasAttribute('tabindex')) {
+      el.setAttribute('tabindex', '-1');
+      el.addEventListener('blur', () => el.removeAttribute('tabindex'), { once: true });
+    }
+    target.focus({ preventScroll: true });
   });
 }
 
