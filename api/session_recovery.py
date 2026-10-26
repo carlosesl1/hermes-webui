@@ -34,7 +34,7 @@ import shutil
 import sqlite3
 import sys
 import threading
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 
 from api.turn_journal import (
@@ -425,11 +425,12 @@ def recover_session(session_path: Path) -> dict:
     tmp_path = session_path.with_suffix('.json.recover.tmp')
     try:
         shutil.copyfile(bak_path, tmp_path)
-        _note_recovered_sidecar_write(session_path)
-        try:
+        # Standalone CLI has no in-process cache; server recovery must share
+        # save's begin/end guard, including exception cleanup and active counts.
+        models = sys.modules.get('api.models')
+        guard = models._sidecar_write(session_path.stem) if models is not None else nullcontext()
+        with guard:
             tmp_path.replace(session_path)
-        finally:
-            _note_recovered_sidecar_write(session_path)
     except OSError as exc:
         logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
         try:

@@ -191,10 +191,13 @@ def _safe_replace(src: Path, dst: Path) -> None:
 # would hide that write behind the pre-write object, and the next
 # whole-session save of the cached object would undo it on disk. Stat
 # signatures cannot see two same-size saves inside one clock tick, so writers
-# count instead: once before and once after the replace, which makes any read
-# that overlaps a replace observe a change.
+# count before and after the replace AND track active writers. A write may
+# surround the entire read, and overlapping writers make parity insufficient.
+# Lock order: LOCK -> this guard. Writers never acquire LOCK while holding this
+# guard, and no disk I/O or agent/save-lock wait runs under it.
 _SIDECAR_WRITE_GENERATIONS: dict[str, int] = {}
-_SIDECAR_WRITE_GENERATIONS_LOCK = threading.Lock()
+_SIDECAR_WRITES_ACTIVE: dict[str, int] = {}
+_SIDECAR_WRITE_GENERATIONS_LOCK = threading.RLock()
 _SIDECAR_WRITE_LOCAL = threading.local()
 
 
@@ -224,12 +227,33 @@ def _sidecar_write_generation(session_id) -> tuple[int, int]:
     return total, own
 
 
-def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
-    _note_sidecar_write(session_id)
+@contextmanager
+def _sidecar_write(session_id):
+    """Bracket a sidecar replacement without holding a global I/O lock.
+
+    The same guard makes writer begin/end atomic with reader validation and
+    publication. Completed self-heals remain attributable to the loading thread.
+    Active counts (not parity) cover overlapping writers and unwind on errors.
+    """
+    sid = str(session_id or '')
+    with _SIDECAR_WRITE_GENERATIONS_LOCK:
+        _note_sidecar_write(sid)
+        _SIDECAR_WRITES_ACTIVE[sid] = _SIDECAR_WRITES_ACTIVE.get(sid, 0) + 1
     try:
-        _safe_replace(tmp, path)
+        yield
     finally:
-        _note_sidecar_write(session_id)
+        with _SIDECAR_WRITE_GENERATIONS_LOCK:
+            _note_sidecar_write(sid)
+            remaining = _SIDECAR_WRITES_ACTIVE[sid] - 1
+            if remaining:
+                _SIDECAR_WRITES_ACTIVE[sid] = remaining
+            else:
+                _SIDECAR_WRITES_ACTIVE.pop(sid)
+
+
+def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
+    with _sidecar_write(session_id):
+        _safe_replace(tmp, path)
 
 
 # Serializes index writers so concurrent Session.save() calls cannot race on
@@ -4988,14 +5012,20 @@ def _resolve_session_once(
                 if not (SESSION_DIR / f"{sid}.json").exists():
                     raise KeyError(sid)
                 resident = SESSIONS.get(sid)
-                now = _sidecar_write_generation(sid)
-                # Writes by this thread (a self-heal save inside load) are
-                # part of what it read; only other writers make it stale.
-                unchanged = (now[0] - before[0]) == (now[1] - before[1])
+                with _SIDECAR_WRITE_GENERATIONS_LOCK:
+                    now = _sidecar_write_generation(sid)
+                    # A completed self-heal inside load belongs to this read.
+                    # An active replacement can surround BOTH samples, so an
+                    # unchanged generation alone cannot authorize publication.
+                    unchanged = (
+                        not _SIDECAR_WRITES_ACTIVE.get(str(sid))
+                        and (now[0] - before[0]) == (now[1] - before[1])
+                    )
+                    if resident is None and unchanged:
+                        SESSIONS[sid] = s
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
                 if resident is None and unchanged:
-                    SESSIONS[sid] = s
-                    if promote_cache:
-                        SESSIONS.move_to_end(sid)
                     _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
                     break
             if resident is not None:

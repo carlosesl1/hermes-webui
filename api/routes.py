@@ -791,6 +791,12 @@ def _delete_target_session(sid, active_ids):
         return resident
     if resident is None:
         with LOCK:
+            # A cold GET may have published while load did disk I/O. Draft
+            # waiters already hold that object: never replace it or refresh it
+            # from our older snapshot, even when message counts still match.
+            current = SESSIONS.get(sid)
+            if current is not None:
+                return current
             SESSIONS[sid] = fresh
             SESSIONS.move_to_end(sid)
         return fresh
