@@ -286,6 +286,8 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
     default=None,
 )
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
+_STREAMING_CRONJOB_WRAPPER_WARNED = False
+_STREAMING_CRONJOB_TOOL_NAMES = ("cronjob_manage", "cronjob")
 
 
 def _stream_writeback_diag_threshold_seconds(environ=None):
@@ -354,44 +356,43 @@ def _log_stream_writeback_timings(
 
 
 def _install_streaming_cronjob_profile_wrapper() -> None:
-    """Wrap the agent cronjob tool so calls run under the streaming profile.
+    """Wrap registered cron tools under the streaming profile.
 
     The in-chat agent run already binds per-turn contextvars for other
     session-scoped state. Cron jobs are special because ``cron.jobs`` snapshots
-    path constants at import time, so the model-facing ``cronjob`` tool must
-    enter the existing WebUI cron profile context at the tool-call boundary.
-    That context uses the cron-specific lock and restores the module caches as
-    soon as the single cron tool call returns, avoiding long-lived global path
-    mutation for the whole agent turn.
+    path constants at import time, so the model-facing cron tool must enter the
+    existing WebUI cron profile context at the tool-call boundary. That context
+    uses the cron-specific lock and restores the module caches as soon as the
+    single cron tool call returns, avoiding long-lived global path mutation for
+    the whole agent turn.
     """
-    global _STREAMING_CRONJOB_WRAPPER_INSTALLED
+    global _STREAMING_CRONJOB_WRAPPER_INSTALLED, _STREAMING_CRONJOB_WRAPPER_WARNED
     if _STREAMING_CRONJOB_WRAPPER_INSTALLED:
         return
     try:
-        from tools.registry import registry
+        installed = _wrap_streaming_cronjob_tool_entries()
     except Exception:
-        logger.debug("streaming cronjob wrapper: tools registry unavailable", exc_info=True)
+        # A future hermes-agent shape change must not abort a chat stream
+        # (#8186). Warn once to keep the logs quiet, but leave the installed flag
+        # unset: one failed registration must not disable profile pinning for the
+        # life of the process, or every later chat-created job lands in the
+        # default profile's store (#8201).
+        if not _STREAMING_CRONJOB_WRAPPER_WARNED:
+            _STREAMING_CRONJOB_WRAPPER_WARNED = True
+            logger.warning("streaming cronjob wrapper: install failed", exc_info=True)
         return
+    _STREAMING_CRONJOB_WRAPPER_INSTALLED = installed
 
-    entry = registry.get_entry("cronjob")
-    if entry is None:
-        try:
-            import tools.cronjob_tools  # noqa: F401
-        except Exception:
-            logger.debug("streaming cronjob wrapper: cronjob tool import failed", exc_info=True)
-        entry = registry.get_entry("cronjob")
-    if entry is None:
-        logger.debug("streaming cronjob wrapper: cronjob tool not registered")
-        return
-    original_handler = entry.handler
-    if getattr(original_handler, "_webui_streaming_profile_wrapper", False):
-        _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
-        return
 
-    # This relies on the agent tool executor's ``propagate_context_to_thread``
-    # using an unfiltered ``contextvars.copy_context()`` so this WebUI-owned
-    # contextvar reaches the sync cronjob handler even when the tool call runs
-    # on the agent's ThreadPoolExecutor worker.
+def _streaming_cronjob_profile_handler(original_handler):
+    """Return a cron tool handler that enters the streaming cron profile.
+
+    This relies on the agent tool executor's ``propagate_context_to_thread``
+    using an unfiltered ``contextvars.copy_context()`` so this WebUI-owned
+    contextvar reaches the sync cronjob handler even when the tool call runs
+    on the agent's ThreadPoolExecutor worker.
+    """
+
     def _profile_scoped_cronjob_handler(args, **kwargs):
         profile_home = _STREAMING_CRON_PROFILE_HOME.get()
         if not profile_home:
@@ -402,20 +403,90 @@ def _install_streaming_cronjob_profile_wrapper() -> None:
 
     _profile_scoped_cronjob_handler.__dict__["_webui_streaming_profile_wrapper"] = True
     _profile_scoped_cronjob_handler.__dict__["_webui_original_handler"] = original_handler
-    registry.register(
-        name=entry.name,
-        toolset=entry.toolset,
-        schema=entry.schema,
-        handler=_profile_scoped_cronjob_handler,
-        check_fn=entry.check_fn,
-        requires_env=entry.requires_env,
-        is_async=entry.is_async,
-        description=entry.description,
-        emoji=entry.emoji,
-        max_result_size_chars=entry.max_result_size_chars,
-        dynamic_schema_overrides=entry.dynamic_schema_overrides,
-    )
-    _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+    return _profile_scoped_cronjob_handler
+
+
+def _wrap_streaming_cronjob_tool_entries() -> bool:
+    """Wrap every registered cron tool name; True once at least one is wrapped.
+
+    Only the global registry slot is wrapped, so a profile-scoped tool override
+    stays scoped to its profile (#8201). Returns False when neither name
+    resolves, so a later stream can retry after the agent registers its tools.
+    """
+    try:
+        from tools.registry import registry
+    except Exception:
+        logger.debug("streaming cronjob wrapper: tools registry unavailable", exc_info=True)
+        return False
+
+    # ``get_entry`` resolves the merged view, where the active profile's scoped
+    # override wins over the global slot. Re-registering that entry without a
+    # scope would promote one profile's handler to every profile, so prefer the
+    # global-slot read where the registry offers it and leave scoped overrides
+    # untouched. Older builds only have ``get_entry``.
+    snapshot_registration = getattr(registry, "snapshot_registration", None)
+    if not callable(snapshot_registration):
+        snapshot_registration = None
+
+    def _resolve_entry(name):
+        if snapshot_registration is None:
+            return registry.get_entry(name)
+        return snapshot_registration(name, scope=None)
+
+    def _resolve_entries():
+        entries = []
+        for name in _STREAMING_CRONJOB_TOOL_NAMES:
+            entry = _resolve_entry(name)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    entries = _resolve_entries()
+    if not entries:
+        # Importing the tool module is what registers it. The module path is the
+        # same under both tool names.
+        try:
+            import tools.cronjob_tools  # noqa: F401
+        except Exception:
+            logger.debug("streaming cronjob wrapper: cronjob tool import failed", exc_info=True)
+        entries = _resolve_entries()
+    if not entries:
+        logger.debug("streaming cronjob wrapper: cronjob tool not registered")
+        return False
+
+    installed = False
+    seen = set()
+    for entry in entries:
+        if id(entry) in seen:
+            continue
+        seen.add(id(entry))
+        original_handler = entry.handler
+        if getattr(original_handler, "_webui_streaming_profile_wrapper", False):
+            installed = True
+            continue
+
+        register_kwargs = dict(
+            name=entry.name,
+            toolset=entry.toolset,
+            schema=entry.schema,
+            handler=_streaming_cronjob_profile_handler(original_handler),
+            check_fn=entry.check_fn,
+            requires_env=entry.requires_env,
+            is_async=entry.is_async,
+            description=entry.description,
+            emoji=entry.emoji,
+            max_result_size_chars=entry.max_result_size_chars,
+        )
+        # Older hermes-agent builds predate ``ToolEntry.dynamic_schema_overrides``
+        # (and the matching ``register()`` kwarg). Forward it only when both sides
+        # know it, otherwise every chat stream fails with AttributeError (#8186).
+        if hasattr(entry, "dynamic_schema_overrides") and _supports_kwarg(
+            registry.register, "dynamic_schema_overrides"
+        ):
+            register_kwargs["dynamic_schema_overrides"] = entry.dynamic_schema_overrides
+        registry.register(**register_kwargs)
+        installed = True
+    return installed
 
 
 def _supports_kwarg(func, kwarg_name: str) -> bool:
@@ -6394,54 +6465,74 @@ def _strip_replayed_prefix(existing_messages, candidates):
     existing_messages = list(existing_messages or [])
     candidates = list(candidates or [])
     max_overlap = min(len(existing_messages), len(candidates))
-    for overlap in range(max_overlap, 0, -1):
-        left = [_message_replay_key(m) for m in existing_messages[-overlap:]]
-        right = [_message_replay_key(m) for m in candidates[:overlap]]
-        from api.models import _cross_source_replay_match
-        if left == right and all(
-            _cross_source_replay_match(a, b, allow_legacy=overlap >= 3)
-            for a, b in zip(existing_messages[-overlap:], candidates[:overlap], strict=True)
-        ):
-            return candidates[overlap:]
+    if not max_overlap:
+        return candidates
+    # KMP matches the longest candidate prefix at the end of the old transcript.
+    # Each payload is keyed once; shrinking slices re-serialized O(n²) rows while
+    # settlement held the session lock. Keep the existing replay-key semantics.
+    keys = [_message_replay_key(m) for m in candidates[:max_overlap]]
+    fallback = [0] * max_overlap
+    matched = 0
+    for idx in range(1, max_overlap):
+        while matched and keys[idx] != keys[matched]:
+            matched = fallback[matched - 1]
+        if keys[idx] == keys[matched]:
+            matched += 1
+        fallback[idx] = matched
+    matched = 0
+    for message in existing_messages[-max_overlap:]:
+        key = _message_replay_key(message)
+        if matched == max_overlap:
+            matched = fallback[matched - 1]
+        while matched and key != keys[matched]:
+            matched = fallback[matched - 1]
+        if key == keys[matched]:
+            matched += 1
+    # Keys only select possible overlaps: the fork's occurrence/provenance and
+    # full-content checks remain authoritative, including short-repeat safety.
+    from api.models import _cross_source_replay_match, _session_message_content_key
+    old_content, new_content = {}, {}
+    while matched:
+        start = len(existing_messages) - matched
+        valid = True
+        for idx in range(matched):
+            old_idx = start + idx
+            left, right = existing_messages[old_idx], candidates[idx]
+            equal = None
+            if isinstance(left, dict) and isinstance(right, dict):
+                if old_idx not in old_content:
+                    old_content[old_idx] = _session_message_content_key(left)
+                if idx not in new_content:
+                    new_content[idx] = _session_message_content_key(right, normalize_workspace_prefix=True)
+                equal = old_content[old_idx] == new_content[idx]
+            if not _cross_source_replay_match(left, right, allow_legacy=matched >= 3, content_equal=equal):
+                valid = False
+                break
+        if valid:
+            return candidates[matched:]
+        matched = fallback[matched - 1]
     return candidates
 
 
-def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
-    """Return True for repeated LCM/session summaries with refreshed hints.
+def _session_arc_summary_key(message):
+    """Identify long summaries by role, provider payload and normalized prefix."""
+    if not isinstance(message, dict):
+        return None
+    text = ' '.join(_message_text(message.get('content', '')).split())
+    if len(text) < 2000 or not text.startswith('[Session Arc Summary'):
+        return None
+    api_content = message.get('api_content')
+    normalized = ' '.join(api_content.split()) if isinstance(api_content, str) and api_content else None
+    return (message.get('role'), normalized, text[:1500])
 
-    LCM summary cards can be re-injected with the same long recovered context
-    and a different tail such as an expand hint. Exact identity misses those,
-    but appending both copies bloats every later model prompt.
-    """
-    if not isinstance(previous_msg, dict) or not isinstance(candidate_msg, dict):
-        return False
-    if previous_msg.get('role') != candidate_msg.get('role'):
-        return False
-    previous_api_content = previous_msg.get("api_content")
-    candidate_api_content = candidate_msg.get("api_content")
-    normalized_previous_api_content = (
-        " ".join(previous_api_content.split())
-        if isinstance(previous_api_content, str) and previous_api_content
-        else None
-    )
-    normalized_candidate_api_content = (
-        " ".join(candidate_api_content.split())
-        if isinstance(candidate_api_content, str) and candidate_api_content
-        else None
-    )
-    if normalized_previous_api_content != normalized_candidate_api_content:
-        return False
+
+def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
+    """Recognize the same recovered context with a refreshed trailing hint."""
+    previous_key = _session_arc_summary_key(previous_msg)
     from api.models import _message_private_identity_compatible
-    if not _message_private_identity_compatible(previous_msg, candidate_msg):
-        return False
-    previous_text = " ".join(_message_text(previous_msg.get('content', '')).split())
-    candidate_text = " ".join(_message_text(candidate_msg.get('content', '')).split())
-    if len(previous_text) < 2000 or len(candidate_text) < 2000:
-        return False
-    marker = '[Session Arc Summary'
-    if not previous_text.startswith(marker) or not candidate_text.startswith(marker):
-        return False
-    return previous_text[:1500] == candidate_text[:1500]
+    return (previous_key is not None
+            and previous_key == _session_arc_summary_key(candidate_msg)
+            and _message_private_identity_compatible(previous_msg, candidate_msg))
 
 
 def _strip_replayed_context_items(existing_messages, candidates):
@@ -6453,29 +6544,101 @@ def _strip_replayed_context_items(existing_messages, candidates):
 
     existing_keys = [_message_replay_key(m) for m in existing_messages]
     candidate_keys = [_message_replay_key(m) for m in candidates]
-    existing_large = [m for m in existing_messages if isinstance(m, dict)]
+    # Reversing both sequences turns a match starting at candidate idx into a
+    # match ending at the corresponding reversed position. A suffix automaton
+    # computes these longest matches without scanning every old start again.
+    transitions, links, lengths = [{}], [-1], [0]
+    last = 0
+    for key in reversed(existing_keys):
+        current = len(transitions)
+        transitions.append({})
+        lengths.append(lengths[last] + 1)
+        links.append(0)
+        parent = last
+        while parent >= 0 and key not in transitions[parent]:
+            transitions[parent][key] = current
+            parent = links[parent]
+        if parent >= 0:
+            target = transitions[parent][key]
+            if lengths[parent] + 1 == lengths[target]:
+                links[current] = target
+            else:
+                clone = len(transitions)
+                transitions.append(dict(transitions[target]))
+                lengths.append(lengths[parent] + 1)
+                links.append(links[target])
+                while parent >= 0 and transitions[parent].get(key) == target:
+                    transitions[parent][key] = clone
+                    parent = links[parent]
+                links[target] = links[current] = clone
+        last = current
+
+    matches = [0] * len(candidate_keys)
+    state = matched = 0
+    for idx in range(len(candidate_keys) - 1, -1, -1):
+        key = candidate_keys[idx]
+        while state and key not in transitions[state]:
+            state = links[state]
+            matched = min(matched, lengths[state])
+        target = transitions[state].get(key)
+        if target is None:
+            matched = 0
+        else:
+            state = target
+            matched += 1
+        matches[idx] = matched
+
+    from api.models import _message_private_identity_compatible
+    identity_fields = ("id", "message_id", "message_uid", "_row_id",
+                       "_state_db_row_id", "_db_row_id", "state_db_row_id",
+                       "_source", "_active_turn_token", "tool_use_id", "api_content")
+    guarded = any(isinstance(m, dict) and any(k in m for k in identity_fields)
+                  for m in existing_messages + candidates)
+    starts = {}
+    if guarded:
+        for index, key in enumerate(existing_keys):
+            starts.setdefault(key, []).append(index)
+    summary_keys = {}
+    unusual_summary_keys = []
+    for message in existing_messages:
+        key = _session_arc_summary_key(message)
+        if key is not None:
+            try:
+                summary_keys.setdefault(key, []).append(message)
+            except TypeError:
+                unusual_summary_keys.append((key, message))
     cleaned = []
     idx = 0
-    from api.models import _message_private_identity_compatible
     min_block = 3
     while idx < len(candidates):
         msg = candidates[idx]
-        if any(_looks_like_replayed_session_arc_summary(prev, msg) for prev in existing_large):
+        key = _session_arc_summary_key(msg)
+        try:
+            summary_rows = summary_keys.get(key, ()) if key is not None else ()
+        except TypeError:
+            summary_rows = [row for old_key, row in unusual_summary_keys if old_key == key]
+        repeated_summary = any(_message_private_identity_compatible(prev, msg)
+                               for prev in summary_rows)
+        if repeated_summary:
             idx += 1
             continue
 
-        best = 0
-        for start in range(len(existing_keys)):
-            length = 0
-            while (
-                idx + length < len(candidate_keys)
-                and start + length < len(existing_keys)
-                and candidate_keys[idx + length] == existing_keys[start + length]
-                and _message_private_identity_compatible(candidates[idx + length], existing_messages[start + length])
-            ):
-                length += 1
-            if length > best:
-                best = length
+        best = matches[idx]
+        if guarded and best >= min_block:
+            # Missing identity behaves as a wildcard; plain-key SAM cannot
+            # decide it safely. Search only possible starts, preserving the
+            # original longest compatible block (including shorter alternatives).
+            best = 0
+            for start in starts.get(candidate_keys[idx], ()):
+                length = 0
+                while (idx + length < len(candidates)
+                       and start + length < len(existing_messages)
+                       and candidate_keys[idx + length] == existing_keys[start + length]
+                       and _message_private_identity_compatible(candidates[idx + length], existing_messages[start + length])):
+                    length += 1
+                best = max(best, length)
+                if best == matches[idx]:
+                    break
         if best >= min_block:
             idx += best
             continue

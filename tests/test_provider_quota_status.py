@@ -240,6 +240,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
         "plan": "Pro",
         "windows": [
             {
+                "limit_window_seconds": None,
                 "label": "Session",
                 "used_percent": 15.0,
                 "remaining_percent": 85.0,
@@ -247,6 +248,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 "detail": None,
             },
             {
+                "limit_window_seconds": None,
                 "label": "Weekly",
                 "used_percent": 40.0,
                 "remaining_percent": 60.0,
@@ -402,6 +404,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
         "next_reset_at": "2030-03-17T17:46:40Z",
         "best_remaining_by_window": [
             {
+                "limit_window_seconds": None,
                 "label": "Session",
                 "remaining_percent": 85.0,
                 "used_percent": 15.0,
@@ -410,6 +413,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                 "credential_label": "Team primary",
             },
             {
+                "limit_window_seconds": None,
                 "label": "Weekly",
                 "remaining_percent": 60.0,
                 "used_percent": 40.0,
@@ -425,6 +429,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                 "plan": "Pro",
                 "windows": [
                     {
+                        "limit_window_seconds": None,
                         "label": "Session",
                         "used_percent": 15.0,
                         "remaining_percent": 85.0,
@@ -432,6 +437,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                         "detail": None,
                     },
                     {
+                        "limit_window_seconds": None,
                         "label": "Weekly",
                         "used_percent": 40.0,
                         "remaining_percent": 60.0,
