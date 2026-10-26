@@ -410,20 +410,18 @@ def test_the_dialog_uses_one_noun_for_chats():
 
 
 def test_every_locale_speaks_the_sidebar_noun():
+    """Native copy uses its chat noun; fallback copy uses the English chat noun."""
+    from tests.i18n_runtime import assert_locale_contract
+
     chunks = _locale_chunks(_read_static("i18n.js"))
-    for loc, (session_word, chat_word) in _CHAT_NOUNS.items():
-        # The default-workspace tooltip is user-visible text: it kept saying the
-        # locale's "sessions" word in 12 locales (maintainer LOW,
-        # 2026-10-09T23:55:01Z). It is the surviving string of this item, and it
-        # is asserted alone now that the auto-assign label/hint (and the
-        # confirmation they had to agree with) moved to a follow-up PR.
-        title = _locale_value(chunks[loc], "pb_set_default_title")
-        noun = _TITLE_CHAT_NOUNS.get(loc, chat_word)
+    values = assert_locale_contract(("pb_set_default_title",))
+    for loc, record in values.items():
+        # Resolve the actual language of this key, not merely the selected UI locale.
+        native = re.search(r"(?m)^\s*pb_set_default_title:", chunks[loc])
+        source_locale = loc if native else "en"
+        session_word, chat_word = _CHAT_NOUNS[source_locale]
+        noun = _TITLE_CHAT_NOUNS.get(source_locale, chat_word)
+        title = record["pb_set_default_title"]
         if session_word is not None:
-            assert session_word.lower() not in title.lower(), (
-                f"locale {loc!r} pb_set_default_title still uses "
-                f"{session_word!r}: {title}"
-            )
-        assert noun.lower() in title.lower(), (
-            f"locale {loc!r} pb_set_default_title must use {noun!r}: {title}"
-        )
+            assert session_word.lower() not in title.lower(), (loc, title)
+        assert noun.lower() in title.lower(), (loc, noun, title)

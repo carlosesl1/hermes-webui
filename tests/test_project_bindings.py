@@ -416,5 +416,3 @@ def _project_workspaces_for(proj):
     import api.routes as routes
 
     return routes._project_workspaces(proj)
-
-

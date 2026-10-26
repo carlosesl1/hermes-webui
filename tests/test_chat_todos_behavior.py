@@ -10,7 +10,6 @@ These verify that the chat-embedded task tray wiring stays intact:
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 from pathlib import Path

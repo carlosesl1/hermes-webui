@@ -1022,7 +1022,13 @@ def test_100dvh_viewport_height():
 
 def test_viewport_disables_page_zoom_for_native_pwa_shell():
     """Installed PWA launches should not rubber-band into browser-style page zoom."""
-    assert 'name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"' in HTML
+    tag = re.search(r'<meta\s+name="viewport"\s+content="([^"]+)"', HTML)
+    assert tag is not None
+    attributes = dict(part.strip().split("=", 1) for part in tag.group(1).split(","))
+    assert attributes == {
+        "width": "device-width", "initial-scale": "1", "maximum-scale": "1",
+        "user-scalable": "no", "interactive-widget": "resizes-content",
+    }
 
 
 def test_pwa_safe_area_top_stays_scoped_to_installed_modes():

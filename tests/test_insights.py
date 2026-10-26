@@ -2097,62 +2097,12 @@ INSIGHTS_RANGE_KEYS = ("insights_custom_range", "insights_start_date", "insights
 
 
 def test_insights_range_keys_are_localized_at_runtime():
-    """Gate must-fix 4: the three range keys must resolve to NATIVE strings in
-    every non-English locale at runtime.
+    """All locale switches use the shipped translator, including canonical fallback."""
+    from tests.i18n_runtime import assert_locale_contract
 
-    Source-presence assertions false-greened because all 15 bundles contained
-    the keys - with English literals in the 14 non-English ones.  This evaluates
-    the real i18n bundle in node and reads `t()` per locale after setLocale().
-    """
-    import shutil as _shutil
-    import subprocess
-
-    node = _shutil.which("node")
-    if not node:  # pragma: no cover
-        pytest.skip("node not available")
-
-    harness = """
-        const fs = require('fs');
-        const vm = require('vm');
-        const src = fs.readFileSync(process.env.I18N_JS, 'utf8');
-        const sandbox = {
-          localStorage: { getItem() { return null; }, setItem() {} },
-          navigator: { language: 'en', languages: ['en'] },
-          document: { documentElement: {}, querySelectorAll() { return []; } },
-          console,
-        };
-        sandbox.window = sandbox;
-        const probe = src + "\\n;globalThis.__probe = (() => {"
-          + "const out = {};"
-          + "for (const loc of Object.keys(LOCALES)) {"
-          + "  setLocale(loc);"
-          + "  out[loc] = {lang: document.documentElement.lang,"
-          + "    vals: ['insights_custom_range','insights_start_date','insights_end_date'].map(k => t(k))};"
-          + "}"
-          + "return JSON.stringify(out);"
-          + "})();";
-        vm.runInNewContext(probe, sandbox);
-        console.log(sandbox.__probe);
-    """
-
-    import os
-    env = dict(os.environ)
-    env["I18N_JS"] = str(pathlib.Path(__file__).parent.parent / "static" / "i18n.js")
-    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True,
-                          encoding="utf-8", timeout=60, check=False, env=env)
-    assert proc.returncode == 0, f"node harness failed:\n{proc.stdout}\n{proc.stderr}"
-    out = json.loads(proc.stdout.strip().splitlines()[-1])
-
-    assert out["en"]["vals"] == ["Custom range…", "Start date", "End date"]
-    non_english = sorted(l for l in out if l != "en")
-    assert len(non_english) == 14, f"expected 14 non-English locales, got {non_english}"
-    english = out["en"]["vals"]
-    for loc in non_english:
-        assert out[loc]["lang"], f"{loc} did not resolve a document lang (setLocale failed)"
-        vals = out[loc]["vals"]
-        for key, val, en in zip(INSIGHTS_RANGE_KEYS, vals, english, strict=True):
-            assert val and val != key, f"{loc}.{key} fell back to the key itself"
-            assert val != en, f"{loc}.{key} is still the English literal {en!r}"
+    values = assert_locale_contract(INSIGHTS_RANGE_KEYS)
+    assert list(values["en"].values()) == ["Custom range…", "Start date", "End date"]
+    assert list(values["pt"].values()) == ["Personalizado…", "Data de início", "Data de término"]
 
 
 def test_insights_absolute_range_out_of_platform_endpoints_fail_closed(monkeypatch, tmp_path):
@@ -2735,56 +2685,10 @@ def test_insights_date_cap_rewrites_max_only_when_the_day_changes():
 
 
 def test_insights_range_fallback_note_is_localized_at_runtime():
-    """The new disclosure key must resolve to a NATIVE string with exactly one
-    {days} placeholder in all 15 bundles - source presence alone false-greens,
-    because the 14 non-English bundles have carried English literals before.
-    """
-    import shutil as _shutil
-    import subprocess
+    """Fallback disclosure remains available, with its exact placeholder, in all locales."""
+    from tests.i18n_runtime import assert_locale_contract
 
-    node = _shutil.which("node")
-    if not node:  # pragma: no cover
-        pytest.skip("node not available")
-
-    harness = """
-        const fs = require('fs');
-        const vm = require('vm');
-        const src = fs.readFileSync(process.env.I18N_JS, 'utf8');
-        const sandbox = {
-          localStorage: { getItem() { return null; }, setItem() {} },
-          navigator: { language: 'en', languages: ['en'] },
-          document: { documentElement: {}, querySelectorAll() { return []; } },
-          console,
-        };
-        sandbox.window = sandbox;
-        const probe = src + ";globalThis.__probe = (() => {"
-          + "const out = {};"
-          + "for (const loc of Object.keys(LOCALES)) {"
-          + "  setLocale(loc);"
-          + "  out[loc] = {lang: document.documentElement.lang, val: t('insights_range_fallback')};"
-          + "}"
-          + "return JSON.stringify(out);"
-          + "})();";
-        vm.runInNewContext(probe, sandbox);
-        console.log(sandbox.__probe);
-    """
-
-    import os
-    env = dict(os.environ)
-    env["I18N_JS"] = str(pathlib.Path(__file__).parent.parent / "static" / "i18n.js")
-    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True,
-                          encoding="utf-8", timeout=60, check=False, env=env)
-    assert proc.returncode == 0, f"node harness failed:\n{proc.stdout}\n{proc.stderr}"
-    out = json.loads(proc.stdout.strip().splitlines()[-1])
-
-    assert len(out) == 15, sorted(out)
-    english = out["en"]["val"]
-    assert english == "That range isn\u2019t available. Showing the last {days} days."
-    for loc in sorted(l for l in out if l != "en"):
-        assert out[loc]["lang"], f"{loc} did not resolve a document lang (setLocale failed)"
-        val = out[loc]["val"]
-        assert val != "insights_range_fallback", f"{loc} fell back to the key itself"
-        assert val != english, f"{loc} is still the English literal"
-    for loc, rec in sorted(out.items()):
-        assert rec["val"].count("{days}") == 1, \
-            f"{loc} must carry exactly one {{days}} placeholder: {rec['val']!r}"
+    values = assert_locale_contract(("insights_range_fallback",))
+    assert values["en"]["insights_range_fallback"] == "That range isn’t available. Showing the last {days} days."
+    for locale, record in values.items():
+        assert record["insights_range_fallback"].count("{days}") == 1, locale

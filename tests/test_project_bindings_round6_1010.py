@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -194,11 +193,11 @@ def test_dialog_combos_pass_localized_accessible_names():
 
 
 def test_both_accessible_name_keys_exist_in_every_locale():
-    """No new i18n key was introduced, and the two reused ones are localized in
-    every locale block (a missing key falls back to the raw id)."""
-    i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-    for key in ("pb_add_workspace_title", "pb_field_model"):
-        assert len(re.findall(rf"^\s*{key}:", i18n, flags=re.M)) == 15, key
+    """Accessible names resolve through native copy or canonical English fallback."""
+    from tests.i18n_runtime import assert_locale_contract
+
+    values = assert_locale_contract(("pb_add_workspace_title", "pb_field_model"))
+    assert values["en"] == {"pb_add_workspace_title": "Add workspace", "pb_field_model": "Model"}
 
 
 # --- finding 3 (Greptile P2 2026-10-10T06:00:25Z): auto_assign must be a real

@@ -420,6 +420,134 @@ whose default `SessionDB()` path remains frozen at module import. Keep this fall
 compatibility-only: new goal semantics belong in Hermes Agent's native manager rather
 than a second WebUI implementation.
 
+### 4.9 Project settings and workspace trust
+
+`static/sessions.js` exposes **Project settings…**. `/api/projects/bind`
+stores `workspaces`, `default_workspace`, `model`, and `model_provider` in the
+profile-owned project catalog. The default must belong to the bound set; the
+legacy single `workspace` alias remains readable. `reasoning_effort` and
+`auto_assign` are stored but dormant compatibility metadata, not active controls,
+effort overrides, or an automatic assignment sweep.
+
+New-session defaults require an explicit, visible `project_id`; omitted fields
+inherit project defaults, while caller-present values (including null) win.
+An explicitly changed model never borrows the project's provider. Workspace
+switch and worktree actions pass their selected path explicitly. There is no
+implicit project assignment from a matching workspace. The backend rechecks
+project visibility before publication and rejects foreign-profile project IDs.
+
+All project catalog read-modify-write operations share `PROJECTS_CATALOG_LOCK`
+from `api/models.py`. Deletion clears session bindings with per-session locks and
+fresh stream state outside the catalog lock. Workspace registration and binding
+are distinct from use-time authorization: `resolve_trusted_workspace` still
+validates the resolved directory against home, the saved profile registry, or
+the boot workspace and the existing system-path restrictions. A project row
+alone is not a trust grant. Tests persist an isolated saved-workspace fixture;
+untrusted bindings must return an error before creating a session.
+
+### 4.10 Replay, publication, and derived state
+
+The [run-state contract](docs/rfcs/webui-run-state-consistency-contract.md) separates
+visible transcript, model `context_messages`, pending turn metadata, live SSE,
+durable journal/replay, compression handoff, browser projection/cache, and sidebar
+metadata. These layers must not be collapsed into a single content-deduplication
+rule. Identical genuine user turns remain separate occurrences; cross-source
+reconciliation requires compatible identity/provenance, role and tool-call shape.
+Compaction handoff is model context, not a new human turn in the visible transcript.
+Raw pagination coordinates, stable activity anchors and bounded render caches
+remain projection contracts, not alternate durable owners.
+
+Replay overlap candidates use KMP/context indexing, but the fork's compatibility
+guards remain authoritative. Normalization work is bounded per relevant position;
+this is not an unconditional linear-time claim for adversarial repeated content
+with conflicting provenance, nor a measured end-to-end latency guarantee.
+Sidecar generation fences prevent in-process cold readers publishing over newer
+writes; journal-path caching avoids repeated discovery. Neither is an interprocess
+transaction. Observation-side stale-stream cleanup does not wait for the writer;
+new chat admission may wait explicitly. Delegation remains joined, with principal
+final synthesis; this port does not enable asynchronous delegate wakeups or
+automatic journal retention/deletion.
+
+### 4.11 Presentation and localization contracts
+
+The optional Todos tray uses `hermes-webui-chat-todos`: only `'1'` enables it;
+missing, disabled or inaccessible storage means **off by default**. It reuses the
+existing todo snapshot and renderer, hides duplicate rail UI while enabled, and
+does not rebuild or mutate the transcript. Camera choices are touch-capability
+gated. The viewport adds `interactive-widget=resizes-content` while retaining the
+fork's existing `maximum-scale=1, user-scalable=no` shell policy.
+
+New UI strings belong in canonical English, with native translations such as
+Portuguese where supplied. Other locales use the real `t()` fallback, per
+[GUIDELINES rule 8](docs/GUIDELINES.md#8-fallbacks-and-defaults-are-contracts--extend-the-mechanism-dont-copy-it).
+Do not paste English literals into every locale. Runtime tests switch through all
+15 locales and require complete rendered strings, exact named/numbered placeholder
+preservation, native accessible names where present, and English fallback otherwise.
+This guarantees availability, not native translation of every new string.
+
+Remote-image rendering and app/share CSP use the same validated, per-response
+`HERMES_WEBUI_CSP_IMG_EXTRA` allowlist. Defaults allow only self/data/blob; remote
+opt-in is explicit and malformed sources fail closed. Inert image links avoid
+unrequested remote loads. CSP is defense in depth, not a replacement for profile,
+session, authentication, path containment or symlink checks. Media 401/403/404
+errors remain explicit rather than offering a misleading download fallback.
+
+### 4.12 Insights Period Endpoint (`/api/insights`)
+
+`GET /api/insights` reports usage analytics for one time window. The window is
+selected by query parameters, and the response echoes the window it actually
+served through `mode` (`"trailing"` or `"custom"`). Totals and the daily series
+are always computed over the same resolved interval. Data comes from the WebUI
+session index plus non-WebUI rows in the active profile's `state.db`, when that
+database exists. The optional `sync_to_insights` setting mirrors WebUI usage
+into `state.db`; it does not control whether this endpoint includes CLI rows.
+
+Window selection:
+
+- `days=N` — trailing window of the last `N` days. This is what the panel's
+  7/30/90/365 presets send, and the fallback when no absolute bound is usable.
+- `start=…` / `end=…` — an absolute window. Each bound is either an exact Unix
+  epoch timestamp in seconds or a `YYYY-MM-DD` calendar date. A supplied
+  `start` with no `end` runs to the server clock. A supplied `end` with no
+  `start` back-steps the start by 30 days using the bound's own arithmetic: a
+  `YYYY-MM-DD` end subtracts 30 calendar days (local midnight to local
+  midnight, DST-safe), while a numeric end subtracts exactly `30 * 86400`
+  seconds — so across a daylight-saving change a numeric end's default start can
+  land on a different local date than the calendar one would.
+- The **Custom range…** selection sends the two `<input type=date>` values as
+  raw `YYYY-MM-DD` strings, not epoch seconds, so the server reads them in its
+  own timezone and a browser in another timezone cannot shift the selected
+  calendar day. The panel defaults the inputs to the last 30 calendar days only
+  when no range has been picked yet, so preset → Custom never erases a chosen
+  range.
+
+Bounds and fallbacks:
+
+- A `YYYY-MM-DD` bound selects a whole local calendar day (start = that day's
+  local midnight; an end date's exclusive stop is the next local midnight,
+  except a date equal to today, which clamps to the server clock because that
+  day is not over). An epoch bound keeps its exact `[start, end)` precision.
+  Bounds are swapped if supplied reversed.
+- The window never extends into the future: an `end` beyond the server clock
+  is clamped to `now`.
+- Windows are clamped to five calendar years so the daily series cannot grow
+  unbounded.
+- The request fails closed to the trailing `days` window (`mode: "trailing"`)
+  when an absolute bound cannot be served faithfully: a supplied bound that is
+  unparseable (e.g. `2026-02-31`) or out of the supported epoch range, a
+  pre-epoch date (Chromium's date input accepts `0001-…`, and no session
+  predates 1970), or a strictly-future start. A supplied-but-invalid bound is
+  never treated as an omitted one, so a rejected request cannot fabricate an
+  interval the caller did not ask for. An explicit zero-length window pinned to
+  the clock itself (`start == now`) stays an empty custom interval rather than
+  silently serving the trailing window.
+
+Accounting uses the same canonical timestamp for admission and daily buckets.
+WebUI usage already contains full prompt input; CLI input adds non-cached input,
+cache-read and cache-write tokens. Cache-read is not added a second time to the
+cache-ratio denominator. Optional SQLite cache columns are detected independently,
+and `source='webui'` mirrors are excluded to avoid counting WebUI sessions twice.
+
 ---
 
 ## 5. Frontend Architecture: Current State

@@ -247,13 +247,12 @@ def test_project_bindings_ui_strings_are_localized():
 
 
 def test_project_bindings_i18n_keys_present_in_all_locales():
-    """Every locale block defines the full pb_* key set (i18n.js parity)."""
-    src = _read_static("i18n.js")
-    assert len(I18N_LOCALES) == 15
-    for loc in I18N_LOCALES:
-        chunk = _i18n_locale_chunk(src, loc)
-        missing = [k for k in PB_I18N_KEYS if ("%s: '" % k) not in chunk]
-        assert not missing, f"locale {loc!r} is missing pb_* keys: {missing}"
+    """Every label resolves through real t(), with native copy or English fallback."""
+    from tests.i18n_runtime import assert_locale_contract
+
+    values = assert_locale_contract(PB_I18N_KEYS)
+    assert values["en"]["pb_bindings_title"] == "Project settings — 2"
+    assert values["en"]["pb_bindings_menu"] == "Project settings…"
 
 
 # ---------------------------------------------------------------------------

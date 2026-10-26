@@ -26,7 +26,18 @@ function extract(name){
 }
 class Node {
   constructor(tag){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.parentElement=null;this._value='';this.textContent='';this.id='';}
-  appendChild(child){child.parentElement=this;this.children.push(child);return child;}
+  appendChild(child){
+    if(child.parentElement)child.parentElement.removeChild(child);
+    child.parentElement=this;this.children.push(child);return child;
+  }
+  insertBefore(child,reference){
+    if(reference===null)return this.appendChild(child);
+    if(!this.children.includes(reference))throw new Error('reference is not a child');
+    if(child===reference)return child;
+    if(child.parentElement)child.parentElement.removeChild(child);
+    this.children.splice(this.children.indexOf(reference),0,child);
+    child.parentElement=this;return child;
+  }
   removeChild(child){this.children=this.children.filter(x=>x!==child);child.parentElement=null;}
   querySelectorAll(selector){
     if(selector==='optgroup') return this.children.filter(x=>x.tagName==='OPTGROUP');

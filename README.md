@@ -225,7 +225,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Archive sessions (hide without deleting, toggle to show)
-- Session projects -- named groups with colors for organizing sessions
+- Session projects -- named groups with colors for organizing sessions. Open a project's menu → **Project settings…** to bind multiple workspaces, choose a default workspace, and optionally pin a model/provider. New chats from that project inherit only omitted fields; an explicit workspace or model/provider choice wins. Existing chats are not reassigned by workspace, and project reasoning-effort/automatic-assignment settings are not active features.
 - Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON
@@ -234,6 +234,11 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
+
+### Insights and optional chat panels
+- Insights offers 7/30/90/365-day presets and **Custom range…**. Date inputs select inclusive calendar dates in the server's local timezone; invalid or unsupported ranges visibly fall back to the trailing period. The API reports the effective window, caps future bounds and limits ranges to five calendar years.
+- Usage combines WebUI session data with non-WebUI activity from the active profile's `state.db`. `sync_to_insights` mirrors WebUI usage into that database; it does not gate reading CLI activity. Cache read/write input is accounted for without counting cache-read tokens twice in the cache ratio.
+- The in-chat Todos tray is **off by default**. Enable it explicitly in Settings to show a collapsible tray above the transcript; the separate Todos rail is hidden while it is enabled to avoid duplication. Disabling it restores normal rail/workspace visibility preferences. This display preference does not delete tasks, change transcript identity, or enable journal retention.
 
 ### Workspace file browser
 - Directory tree with expand/collapse (single-click toggles, double-click navigates)
@@ -275,6 +280,8 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Signed HMAC HTTP-only cookie with 24h TTL
 - Minimal dark-themed login page at `/login`
 - Security headers on all responses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
+- Remote images in chat and shared transcripts are denied by default (`img-src 'self' data: blob:`). Administrators may explicitly allow trusted sources using `HERMES_WEBUI_CSP_IMG_EXTRA`; invalid sources fail closed. Blocked images become links instead of automatic remote requests. Allowlisting a source permits it to receive browser requests; do not allow arbitrary origins. See [extension/CSP configuration](docs/EXTENSIONS.md).
+- Approval requires explicit activation of the intended control; pressing Enter elsewhere on the page never means “Allow once”.
 - 20MB POST body size limit
 - CDN resources pinned with SRI integrity hashes
 

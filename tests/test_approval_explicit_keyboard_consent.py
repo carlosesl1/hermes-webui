@@ -17,6 +17,9 @@ def test_document_enter_never_implicitly_approves(target, consumed):
     start = src.index("document.addEventListener('keydown',async e=>{")
     stop = src.index("const LARGE_TEXT_PASTE_CHAR_THRESHOLD", start)
     listener = src[start:stop]
+    helper_start = src.index("function _handleAttachChoiceKeydown(")
+    helper_end = src.index("\n}", helper_start) + 2
+    listener = "let _attachChoiceOpen=false;\n" + src[helper_start:helper_end] + "\n" + listener
     harness = r"""
 let handler;
 const approvals=[];

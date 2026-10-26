@@ -268,6 +268,3 @@ def test_weekly_primary_null_secondary_and_nonfinite(monkeypatch, seconds, label
     for number in (float("nan"), float("inf"), "-inf", "nan"):
         assert ns["_number"](number) is None
         assert providers_mod._quota_number(number) is None
-
-
-

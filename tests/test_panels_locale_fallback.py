@@ -1,17 +1,12 @@
 """New panels copy follows the fork's canonical English + optional pt policy."""
-import json
-from pathlib import Path
-import shutil
-import subprocess
+from tests.i18n_runtime import assert_locale_contract
 
-import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
 KEYS = [
     "insights_period_7d", "insights_period_30d", "insights_period_90d", "insights_period_365d",
     "insights_custom_range", "insights_start_date", "insights_end_date",
     "insights_footer_range", "insights_range_fallback", "provider_quota_usage_limit",
     "settings_label_chat_todos_in_chat", "settings_desc_chat_todos_in_chat",
+    "settings_desc_workspace_todos_tab", "remote_image_open", "remote_image_reason",
     "settings_note_workspace_todos_tab_disabled", "todos_tray_summary_active",
     "todos_tray_summary_done", "composer_attach_options", "composer_attach_photo",
     "composer_attach_files", "media_preview_unauthorized", "media_preview_forbidden",
@@ -24,36 +19,8 @@ KEYS = [
 ]
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
 def test_new_panels_copy_resolves_in_every_locale_with_real_fallback():
-    script = """
-const fs = require('fs');
-const vm = require('vm');
-const context = {
-  localStorage: {getItem() {return null;}, setItem() {}},
-  navigator: {language: 'en', languages: ['en']},
-  document: {documentElement: {}, querySelectorAll() {return [];}},
-  console
-};
-context.window = context;
-vm.createContext(context);
-vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
-vm.runInContext(`
-const keys = ${process.argv[2]};
-const result = {};
-for (const locale of Object.keys(LOCALES)) {
-  setLocale(locale);
-  result[locale] = Object.fromEntries(keys.map(key => [key, t(key, 2, 3)]));
-}
-globalThis.result = result;
-`, context);
-console.log(JSON.stringify(context.result));
-"""
-    result = subprocess.run(
-        [shutil.which("node"), "-e", script, str(ROOT / "static/i18n.js"), json.dumps(KEYS)],
-        capture_output=True, text=True, check=True, timeout=15,
-    )
-    locales = json.loads(result.stdout)
+    locales = assert_locale_contract(KEYS)
     assert len(locales) == 15
     assert locales["en"]["provider_quota_usage_limit"] == "Usage limit"
     assert locales["pt"]["provider_quota_usage_limit"] == "Limite de uso"
@@ -63,8 +30,8 @@ console.log(JSON.stringify(context.result));
     for locale, values in locales.items():
         for key in KEYS:
             assert values[key] and values[key] != key, (locale, key)
-            if locale not in ("en", "pt"):
-                assert values[key] == locales["en"][key], (locale, key)
+            # assert_locale_contract verified native text OR exact English fallback,
+            # including interpolation; native translations must not be overwritten.
         assert values["insights_footer_range"].count("{start}") == 1
         assert values["insights_footer_range"].count("{end}") == 1
         assert values["insights_range_fallback"].count("{days}") == 1

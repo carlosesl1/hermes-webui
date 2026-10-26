@@ -7,13 +7,25 @@ from types import SimpleNamespace
 
 import pytest
 
-from api import routes
+from api import routes, workspace as workspace_api
 
 
 @pytest.fixture
 def project(monkeypatch, tmp_path):
     workspace = tmp_path / "project-space"
     workspace.mkdir()
+    # Persist an actual saved registry row. A project binding alone is NOT a
+    # workspace trust grant; exercise the real resolver rather than stub it.
+    home = tmp_path / "home"
+    home.mkdir()
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    monkeypatch.setattr(workspace_api, "_home_path", lambda: home)
+    monkeypatch.setattr(workspace_api, "_BOOT_DEFAULT_WORKSPACE", str(boot))
+    monkeypatch.setattr(workspace_api, "_profile_default_workspace", lambda: str(boot))
+    monkeypatch.setattr(workspace_api, "_workspaces_file", lambda: tmp_path / "workspaces.json")
+    workspace_api.save_workspaces([{"path": str(workspace), "name": "Project fixture"}])
+    assert workspace_api.resolve_trusted_workspace(str(workspace)) == workspace
     project = {
         "project_id": "p1", "profile": "default", "workspaces": [str(workspace)],
         "default_workspace": str(workspace), "model": "gpt-4o",
@@ -83,3 +95,25 @@ def test_new_session_route_uses_project_defaults(project, monkeypatch):
     assert captured["model"] == "gpt-4o"
     assert captured["model_provider"] == "openai"
     assert captured["project_id"] == "p1"
+
+
+def test_new_session_rejects_untrusted_project_workspace(project, monkeypatch):
+    """Removing workspace trust must fail closed, even for a bound project."""
+    from unittest.mock import Mock
+
+    workspace_api.save_workspaces([])
+    with pytest.raises(ValueError, match="not in the saved workspace"):
+        workspace_api.resolve_trusted_workspace(project["default_workspace"])
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: {"project_id": "p1", "worktree": False})
+    def reject(handler, message, status=400):
+        captured.update(message=message, status=status)
+        return True
+    monkeypatch.setattr(routes, "bad", reject)
+    create = Mock(side_effect=AssertionError("untrusted workspace reached publication"))
+    monkeypatch.setattr(routes, "new_session", create)
+    routes.handle_post(SimpleNamespace(command="POST"), SimpleNamespace(path="/api/session/new"))
+    assert captured["status"] == 400
+    assert "not in the saved workspace" in captured["message"]
+    create.assert_not_called()
