@@ -2494,17 +2494,9 @@ document.addEventListener('keydown',async e=>{
     if(composer){e.preventDefault();composer.focus();}
     return;
   }
-  // Enter on approval card = Allow once (when a button inside the card is focused or
-  // card is visible and focus is not on an input/textarea/select)
-  if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
-    const card=$('approvalCard');
-    const tag=(document.activeElement||{}).tagName||'';
-    if(card&&card.classList.contains('visible')&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
-      e.preventDefault();
-      if(typeof respondApproval==='function') respondApproval('once');
-      return;
-    }
-  }
+  // Approval is explicit consent: Enter belongs to the focused control.
+  // Never turn a page-level key (including Enter on Deny/Close or a removed
+  // control) into Allow once. Native button activation handles approval.
   if((e.metaKey||e.ctrlKey)&&e.key==='k'){
     const t=e.target;
     const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
