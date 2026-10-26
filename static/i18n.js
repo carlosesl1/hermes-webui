@@ -29,6 +29,8 @@ const LOCALES = {
     offline_checking: 'Checking…',
     offline_stream_waiting: 'Connection lost. Waiting to refresh…',
     _lang: 'en',
+    remote_image_open: 'Open image',
+    remote_image_reason: 'Remote image not loaded automatically. Opens {host} in a new tab.',
     _label: 'English',
     _speech: 'en-US',
     // boot.js
