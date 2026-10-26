@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,13 +18,20 @@ def _install_lightweight_resolve_stubs(monkeypatch, models) -> None:
 
 
 def _empty_session(models, sid: str):
+    # Model a real load's backing sidecar: cold publication now refuses a file
+    # deleted between load and cache insertion. All files live in the fixture.
+    (models.SESSION_DIR / f"{sid}.json").write_text(
+        json.dumps({"session_id": sid, "message_count": 0,
+                    "anchor_scene_index": {}, "messages": []}), encoding="utf-8",
+    )
     return models.Session(session_id=sid, messages=[])
 
 
 @pytest.fixture(autouse=True)
-def _clear_session_cache():
+def _clear_session_cache(tmp_path, monkeypatch):
     import api.models as models
 
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
     with models.LOCK:
         models.SESSIONS.clear()
     yield
